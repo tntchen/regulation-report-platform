@@ -84,9 +84,9 @@ async def trace_and_audit_middleware(request: Request, call_next):
     # 写操作（POST/PUT/DELETE）自动审计；用户身份由 get_current_user 写入 request.state
     if method in ("POST", "PUT", "DELETE"):
         user = getattr(request.state, "user", None)
-        # 从路径粗提取租户ID（/v1/tenants/{tid}/...）
+        # 从路径粗提取租户ID（/v1/tenants/{tid}/...）；/v1/tenants 集合路径无 tid 时取 None
         parts = path.split("/")
-        tenant_id = parts[parts.index("tenants") + 1] if "tenants" in parts else None
+        tenant_id = parts[parts.index("tenants") + 1] if "tenants" in parts and parts.index("tenants") + 1 < len(parts) else None
         await write_audit(
             action="http.write",
             tenant_id=tenant_id,
@@ -120,11 +120,65 @@ app.include_router(api_router)
 
 
 # ============================================
-# 健康检查
+# 健康检查（深度版）
+# status 分级: ok=全部正常 / degraded=非核心组件异常 / down=数据库不可用
+# 响应保留 status/version 字段，向后兼容旧调用方
 # ============================================
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "version": settings.app_version}
+    import os
+    from sqlalchemy import text
+
+    checks: dict = {}
+
+    # 1) 平台库可写探测（临时表写/删，验证可写而不只是连通）
+    try:
+        async with platform_engine.begin() as conn:
+            await conn.execute(text("CREATE TEMP TABLE IF NOT EXISTS _health_probe (id INTEGER)"))
+            await conn.execute(text("INSERT INTO _health_probe VALUES (1)"))
+            await conn.execute(text("DELETE FROM _health_probe"))
+        checks["database"] = "ok"
+    except Exception as exc:
+        logger.error("健康检查: 平台库可写探测失败: %s", exc)
+        checks["database"] = "fail"
+
+    # 2) 租户向量目录可用（upload_dir 存在且可写，向量库按租户落在其下）
+    try:
+        os.makedirs(settings.upload_dir, exist_ok=True)
+        probe = os.path.join(settings.upload_dir, ".health_probe")
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.remove(probe)
+        checks["vector_dir"] = "ok"
+    except Exception as exc:
+        logger.error("健康检查: 向量目录探测失败: %s", exc)
+        checks["vector_dir"] = "fail"
+
+    # 3) AI 后端连通性（mock 模式显式标注，不假装真实连通）
+    if settings.ai_mock_mode:
+        checks["ai"] = "mock"
+    else:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp = await client.get(
+                    f"{settings.ai_base_url}/models",
+                    headers={"Authorization": f"Bearer {settings.ai_api_key}"},
+                )
+            checks["ai"] = "ok" if resp.status_code < 500 else "fail"
+        except Exception as exc:
+            logger.warning("健康检查: AI 后端连通探测失败: %s", exc)
+            checks["ai"] = "fail"
+
+    # 分级：库挂=down；其余任一 fail=degraded；mock 视为可用（Demo 合法状态）
+    if checks["database"] == "fail":
+        status = "down"
+    elif "fail" in checks.values():
+        status = "degraded"
+    else:
+        status = "ok"
+
+    return {"status": status, "version": settings.app_version, "checks": checks}
 
 
 if __name__ == "__main__":

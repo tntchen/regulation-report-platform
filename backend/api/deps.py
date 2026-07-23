@@ -7,8 +7,8 @@ API 公共依赖
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-from backend.core.tenant_context import TenantContext, PRESET_TENANTS
-from backend.services import auth_service
+from backend.core.tenant_context import TenantContext
+from backend.services import auth_service, tenant_service
 from backend.utils.security import decode_access_token, JWTError
 
 # FastAPI 标准 Bearer 认证方案
@@ -46,8 +46,8 @@ async def get_current_user(
 
 async def get_tenant(tenant_id: str = "T001",
                      current_user: dict = Depends(get_current_user)) -> dict:
-    """获取租户上下文（认证 + 租户成员校验）"""
-    tenant_config = PRESET_TENANTS.get(tenant_id)
+    """获取租户上下文（认证 + 租户成员校验；配置从 tenants 表加载，带缓存）"""
+    tenant_config = await tenant_service.get_tenant_config(tenant_id)
     if not tenant_config:
         raise HTTPException(status_code=404, detail="租户不存在")
 

@@ -67,7 +67,11 @@ class TenantContext:
         tenant_context.set({})
 
 
-# 预置租户配置(演示用)
+# 预置租户配置（种子数据 + 兜底默认）
+# Day10 起 tenants 表为权威来源（scripts/seed_tenants.py 灌入，
+# services/tenant_service.py 带缓存加载）；本常量保留两个用途：
+#   1. 种子脚本的输入数据
+#   2. 平台库无该租户记录时的兜底（保证种子未运行时演示流程不断）
 PRESET_TENANTS = {
     "T001": {
         "id": "T001",

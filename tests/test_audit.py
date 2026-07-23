@@ -15,6 +15,8 @@ _tmpdir = tempfile.mkdtemp(prefix="rrp_test_audit_")
 os.environ.setdefault("DATABASE_URL", f"sqlite+aiosqlite:///{_tmpdir}/test_platform.db")
 os.environ.setdefault("UPLOAD_DIR", f"{_tmpdir}/tenants")
 os.environ.setdefault("DEMO_DB_PATH", f"{_tmpdir}/demo_biz.db")
+os.environ.setdefault("TASK_WORK_DIR", f"{_tmpdir}/tasks")  # 交付物落临时目录，不污染 ./data/tasks
+os.environ.setdefault("LOG_DIR", f"{_tmpdir}/logs")
 os.environ.setdefault("SECRET_KEY", "test-secret-key-for-pytest")
 os.environ.setdefault("DEBUG", "false")
 

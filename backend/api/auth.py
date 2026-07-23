@@ -7,8 +7,7 @@ GET  /v1/auth/me     当前用户信息 + 可访问租户列表
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from backend.api.deps import get_current_user
-from backend.core.tenant_context import PRESET_TENANTS
-from backend.services import auth_service, audit_service
+from backend.services import auth_service, audit_service, tenant_service
 from backend.utils.security import create_access_token
 
 router = APIRouter(prefix="/auth", tags=["认证"])
@@ -59,16 +58,17 @@ async def login(payload: dict, request: Request):
 async def me(current_user: dict = Depends(get_current_user)):
     """当前用户信息 + 可访问租户列表"""
     tenant_ids = await auth_service.get_user_tenants(current_user["id"])
-    tenants = [
-        {
-            "id": t["id"],
-            "name": t["name"],
-            "code": t["code"],
-            "status": "active",
-        }
-        for t in (PRESET_TENANTS.get(tid) for tid in tenant_ids)
-        if t
-    ]
+    tenants = []
+    for tid in tenant_ids:
+        # 租户表为权威来源（含动态创建租户），DB 无记录时 tenant_service 回退预置默认
+        t = await tenant_service.get_tenant_config(tid)
+        if t:
+            tenants.append({
+                "id": t["id"],
+                "name": t["name"],
+                "code": t["code"],
+                "status": "active",
+            })
     return {
         "user": current_user,
         "tenants": tenants,

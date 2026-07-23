@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     # 应用信息
     app_name: str = "regulation-report-platform"
     app_version: str = "2.0.0"
-    debug: bool = True
+    debug: bool = False  # 默认关闭调试；本地开发在 .env 中显式 DEBUG=true 开启
     host: str = "0.0.0.0"
     port: int = 8080
 
@@ -33,7 +33,8 @@ class Settings(BaseSettings):
     ai_max_tokens: int = 8192
     ai_timeout: int = 60
 
-    # 离线Mock模式: true时强制使用内置MockAIAdapter，不依赖真实AI服务
+    # 离线Mock模式: True 时使用内置 MockAIAdapter（Demo 默认开启）；
+    # 置 False 后必须配置有效 AI_API_KEY，否则 AI 调用 fail-fast 报错（见 ai_adapter）
     ai_mock_mode: bool = True
 
     # AI后端配置(备用)

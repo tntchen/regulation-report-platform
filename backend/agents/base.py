@@ -92,24 +92,3 @@ class BaseAgent(ABC):
 
         tool = self.mcp_tools[tool_name]
         return await tool(**params)
-
-
-class AgentRegistry:
-    """Agent注册表"""
-
-    _agents: Dict[str, BaseAgent] = {}
-
-    @classmethod
-    def register(cls, agent: BaseAgent):
-        """注册Agent"""
-        cls._agents[agent.name] = agent
-
-    @classmethod
-    def get(cls, name: str) -> Optional[BaseAgent]:
-        """获取Agent"""
-        return cls._agents.get(name)
-
-    @classmethod
-    def list_agents(cls) -> list:
-        """列出所有Agent"""
-        return list(cls._agents.keys())

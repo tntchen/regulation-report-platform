@@ -3,6 +3,32 @@
 参赛 Demo：基于多 Agent 协作的监管报送 ETL 代码智能生成平台。
 Python 3.10 + FastAPI + SQLite（平台库）+ MySQL（租户业务库，MCP 只读接入）。
 
+## 边界与能力声明
+
+为避免评审误读，平台当前能力边界如实声明如下。
+
+**【L2 已完成的真实能力】**
+
+- JWT 认证 + 租户鉴权：除 `/health` 与登录接口外全部 API 需 Bearer Token，跨租户访问 403。
+- 审计留痕：`audit_logs` 全量记录 who/when/action/result，`trace_id` 贯穿请求、日志与响应头。
+- 任务异步化 + 断点恢复 + 幂等 + 取消：创建秒回；Agent 层 checkpoint 落库，worker 重启续跑；
+  `client_request_id` 幂等去重；阶段边界优雅取消。
+- SQL 只读三层纵深：sqlglot AST 只读白名单（仅单语句 SELECT，fail-closed）
+  → 只读账号最小权限 → 执行护栏（10s 超时 + 行数上限 + 错误脱敏）。
+- 真实语义向量：BGE-small-zh-v1.5 本地模型（512 维）+ 双通道融合检索
+  （语义余弦 0.7 + 中文 bigram 0.3），检索评测基线 **Top-1 81% / Top-3 100%**。
+- 工程质量：76+ pytest 全绿 + CI；`SECRET_KEY` 等敏感配置全部环境变量注入。
+
+**【仍为 Demo 裁剪项】**
+
+- MySQL 真实链路代码就绪，但**待 NAS/Docker 环境实测**（见 `docs/环境验证清单_NAS.md`）；
+  当前演示路径走 SQLite 演示数据集，Agent 4 测试验证属"语法级验证"。
+- 数字孪生为单一场景（1104 G01 vs EAST 个人住房贷款）。
+- Agent 4 对账口径与 Mock SQL 耦合（真实 AI 生成 SQL 的泛化验证有限）。
+- 单进程内置 worker（生产需替换为外部队列，`run_task()` 入口已预留）。
+- 权限体系已建立（认证 + 租户隔离 + 审计），但**角色权限矩阵未细化**（无 RBAC 分级授权）。
+- 前端无自动化测试。
+
 ## 里程碑状态
 
 - **M1**：标准包结构重组 + Agent 1/2/3（制度解析 → 代码生成 → 质量校验）串行流程跑通，
@@ -13,9 +39,15 @@ Python 3.10 + FastAPI + SQLite（平台库）+ MySQL（租户业务库，MCP 只
 - **M3**：数据与向量库管线落地——任务状态 SQLite 持久化（重启可查）；
   38 份真实制度文档批量导入向量库；"上传→解析→切片→索引→检索测试"闭环；
   向量库维护 API 全量补齐（文档管理/索引重建/检索测试/统计/日志）。
-- **M4（当前）**：React 18 + Ant Design 5 前端，5 个页面对接现有 API：
-  任务大厅 / 任务执行（6Agent 流水线实时轮询）/ 六维校验报告 /
-  数字孪生对比 / 向量库维护（含检索测试弹窗、文档详情、索引日志）。
+- **M4**：React 18 + Ant Design 5 前端，页面覆盖任务大厅 / 任务执行（6Agent 流水线实时轮询）/
+  六维校验报告 / 数字孪生对比 / 向量库维护 / 审计日志。
+- **L2 D1-D2**：JWT 认证 + 租户鉴权（bcrypt 密码、HS256 Token、跨租户 403）。
+- **L2 D3**：审计日志（trace_id 贯穿 + 中间件自动埋点 + 前端审计日志页）。
+- **L2 D4-D5**：任务异步化 + 断点恢复 + 幂等 + 取消。
+- **L2 D6-D7**：database_mcp 真实执行 + sqlglot 只读纵深三层。
+- **L2 D8-D9**：BGE-small-zh 真实向量 + 双通道融合检索（Top-1 81% 基线）。
+- **L2 D10（进行中）**：配置外移 + 收口——租户动态化、死代码清理、Mock fail-fast、
+  深度健康检查、CI、文档收口（详见 `docs/方案评审与改进路线图.md` §四 Day 10）。
 
 ## 目录结构
 
@@ -40,7 +72,7 @@ regulation-report-platform/
 │   │   └── mcp.py                 # MCP 服务（Schema 查询 / 只读 SQL / 制度检索）
 │   │
 │   ├── core/                      # 核心引擎
-│   │   ├── tenant_context.py      # 多租户上下文（ContextVar 隔离 + 预置租户）
+│   │   ├── tenant_context.py      # 多租户上下文（ContextVar 隔离 + 租户表动态加载）
 │   │   ├── orchestrator.py        # 任务编排引擎（DAG 调度 + 质量门禁回退重试）
 │   │   └── ai_adapter.py          # AI 适配器（OpenAI 兼容 + 离线 MockAIAdapter）
 │   │
@@ -73,7 +105,8 @@ regulation-report-platform/
 │   ├── smoke_test.py              # M1 冒烟测试：3Agent 串行验证
 │   ├── smoke_test_m2.py           # M2 冒烟测试：6Agent 全链路 + 门禁回退 + 数字孪生
 │   ├── smoke_test_m3.py           # M3 冒烟测试：向量库管线 + 持久化验证
-│   └── seed_regulations.py        # 38 份真实制度文档批量导入
+│   ├── seed_tenants.py            # 首次初始化：租户 + 演示用户 + 数据源 + 预置制度文档（L2-D10）
+│   └── seed_regulations.py        # 38 份真实制度文档批量导入（向量库管线专用）
 │
 ├── frontend/                      # React 18 + AntD 5 前端（M4）
 │   ├── src/App.tsx                # 布局：顶部租户切换 + 侧边菜单 + 路由
@@ -93,10 +126,10 @@ regulation-report-platform/
 pip install -r requirements.txt
 cp .env.example .env    # 可选；生产部署必须设置 SECRET_KEY
 
-# 1. 导入预置制度文档（首次运行）
-python scripts/seed_regulations.py
+# 1. 首次初始化：租户 + 演示用户 + 数据源 + 预置制度文档（38 份）
+python scripts/seed_tenants.py
 
-# 2. 启动后端（默认 8080 端口，首次启动自动建表并初始化演示用户）
+# 2. 启动后端（默认 8080 端口，首次启动自动建表）
 python -m backend.main
 # 或
 uvicorn backend.main:app --host 0.0.0.0 --port 8080
@@ -105,9 +138,11 @@ uvicorn backend.main:app --host 0.0.0.0 --port 8080
 cd frontend
 npm install
 npm run dev
+
+# 4. 浏览器打开前端 → 登录（admin / Admin@1234）→ 任务大厅"新建任务"一键演示
 ```
 
-**演示账号**（启动时自动初始化，密码 bcrypt 哈希落库）：
+**演示账号**（由 `scripts/seed_tenants.py` 初始化，密码 bcrypt 哈希落库）：
 
 | 账号 | 密码 | 可访问租户 |
 | --- | --- | --- |
@@ -233,14 +268,22 @@ M2 冒烟测试覆盖三个场景：
   始终违规的 Mock（验证超过 3 次重试后任务 failed）
 - **数字孪生**：校验两口径差异总额 = 15,600 元（与种子数据资本化利息之和勾稽）、归因文字完整
 
-> 离线 Mock 模式：`config.py` 中 `ai_mock_mode=True`（默认开启），或未配置有效
-> `AI_API_KEY` 时，`AIAdapterFactory` 自动返回 `MockAIAdapter`，产出确定性的演示 SQL。
-> 接入真实 AI 服务时，在 `.env` 配置 `AI_BASE_URL` / `AI_API_KEY` 并设置 `AI_MOCK_MODE=false`。
+> 离线 Mock 模式：演示默认走 `MockAIAdapter`（确定性演示 SQL，不依赖真实 AI Key）。
+> Mock 仅在显式开启 `AI_MOCK_MODE=true` 时生效；接入真实 AI 服务时在 `.env` 配置
+> `AI_BASE_URL` / `AI_API_KEY` 并设置 `AI_MOCK_MODE=false`——
+> 非 Mock 模式且 Key 缺失/无效时启动即报错（fail-fast，配错立即暴露）。
 
 ## 通过 API 创建报送任务
 
 ```bash
+# 1. 先登录获取 Token
+TOKEN=$(curl -s -X POST http://127.0.0.1:8080/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"Admin@1234"}' | python -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+
+# 2. 携带 Token 创建任务（创建后立即返回 task_id，任务后台异步执行）
 curl -X POST http://127.0.0.1:8080/v1/tenants/T001/tasks \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
     "report_type": "EAST",
@@ -251,7 +294,8 @@ curl -X POST http://127.0.0.1:8080/v1/tenants/T001/tasks \
   }'
 ```
 
-返回各 Agent 阶段执行明细与质量门禁报告（`outputs.quality_gate`）。
+创建接口秒回 `task_id`（状态 `queued`）；轮询 `GET /v1/tenants/{tid}/tasks/{task_id}`
+获取各 Agent 阶段执行明细与质量门禁报告（`outputs.quality_gate`）。
 
 ## Agent 3 质量校验（六维）
 

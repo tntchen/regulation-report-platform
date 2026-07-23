@@ -14,10 +14,21 @@ M2 冒烟测试：6Agent 完整链路验证
 import asyncio
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+# 运行环境隔离（Day10 改造）：所有数据落临时目录，运行后整体清理，不再污染 ./data/
+_TMP = tempfile.TemporaryDirectory(prefix="rrp_smoke_m2_")
+os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_TMP.name}/platform.db"
+os.environ["UPLOAD_DIR"] = f"{_TMP.name}/tenants"
+os.environ["DEMO_DB_PATH"] = f"{_TMP.name}/demo_biz.db"
+os.environ["TASK_WORK_DIR"] = f"{_TMP.name}/tasks"
+os.environ["LOG_DIR"] = f"{_TMP.name}/logs"
+os.environ.setdefault("SECRET_KEY", "smoke-test-secret")
+os.environ.setdefault("DEBUG", "false")
 
 # 内嵌制度文本（EAST 住房贷款口径节选）
 INLINE_REGULATION = """# EAST 个人住房贷款口径（冒烟测试内嵌版）
@@ -199,7 +210,11 @@ async def scenario_c(result_a):
 async def main():
     from backend.core import orchestrator as _  # 触发包导入
     from backend.services import task_service
+    from backend.database import Base, platform_engine
 
+    # 全新临时库：先建表，再做轻量列迁移（老库补新列）
+    async with platform_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
     await task_service.ensure_task_columns()  # 轻量列迁移（老库补新列）
 
     result_a = await scenario_a()
@@ -223,4 +238,7 @@ async def main():
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    try:
+        sys.exit(asyncio.run(main()))
+    finally:
+        _TMP.cleanup()  # 清理临时数据目录

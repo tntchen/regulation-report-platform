@@ -1,0 +1,85 @@
+# CI：后端 pytest + 三个冒烟脚本 + 前端构建
+#
+# 关于 embedding / BGE 模型的说明：
+#   BGE-small-zh 首次运行需联网下载（约 100MB），CI 网络慢或受限时会拖垮/卡死流水线。
+#   因此 CI 统一用 EMBEDDING_PROVIDER=tfidf（确定性字符 n-gram TF-IDF 兜底，无模型依赖）。
+#   代价：语义召回能力下降，两个"语义通道直接证据"用例在 tfidf 下必然失败，予以 deselect：
+#     - tests/test_vector.py::test_synonym_recall      （同义表达召回，向量分阈值 0.5）
+#     - tests/test_vector.py::test_disabled_doc_not_recalled （依赖语义排序把启用文档排进 Top-K）
+#   本地有模型缓存时，不设 EMBEDDING_PROVIDER 即可用真实 BGE 跑全量（含这两个用例）。
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # 先装 CPU 版 torch，避免 sentence-transformers 拉入数 GB 的 CUDA 依赖
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Run pytest
+        env:
+          EMBEDDING_PROVIDER: tfidf   # 见文件头说明：CI 不下载 BGE 模型
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+        run: |
+          python -m pytest tests/ -q \
+            --deselect tests/test_vector.py::test_synonym_recall \
+            --deselect tests/test_vector.py::test_disabled_doc_not_recalled
+
+      - name: Smoke test M1 (3-Agent pipeline)
+        env:
+          EMBEDDING_PROVIDER: tfidf
+        run: python scripts/smoke_test.py
+
+      - name: Smoke test M2 (6-Agent pipeline + gate retry)
+        env:
+          EMBEDDING_PROVIDER: tfidf
+        run: python scripts/smoke_test_m2.py
+
+      - name: Smoke test M3 (seed + retrieval + persistence)
+        env:
+          EMBEDDING_PROVIDER: tfidf
+        run: python scripts/smoke_test_m3.py
+
+  frontend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build
+        working-directory: frontend
+        run: npm run build

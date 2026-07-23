@@ -1,7 +1,8 @@
 """
 AI后端适配器
 统一OpenAI兼容接口，支持多后端切换
-Demo 模式：未配置 API Key 或开启 ai_mock_mode 时，自动使用离线 Mock 适配器
+Demo 模式：仅当 ai_mock_mode 显式为 True 时使用离线 Mock 适配器；
+非 Mock 模式且缺失 API Key 时 fail-fast 抛错，不静默降级。
 """
 
 import httpx
@@ -188,7 +189,8 @@ class AIAdapterFactory:
     @staticmethod
     def get_adapter(tenant_id: Optional[str] = None) -> AIBackendAdapter:
         """获取当前租户对应的AI适配器
-        未配置 API Key 或开启 ai_mock_mode 时，返回离线 Mock 适配器"""
+        仅当 ai_mock_mode 显式为 True 时返回离线 Mock 适配器；
+        非 Mock 模式且未配置有效 API Key 时 fail-fast 抛错，不静默降级。"""
 
         if tenant_id:
             # 从租户配置获取
@@ -206,23 +208,17 @@ class AIAdapterFactory:
                 "max_tokens": settings.ai_max_tokens
             }
 
-        # 离线 Mock 模式：无 Key 环境自动降级，保证 Demo 可跑通
-        if settings.ai_mock_mode or not ai_config.get("api_key") or ai_config.get("api_key") in ("", "your-kimi-api-key"):
+        # 离线 Mock 模式：仅显式开启时生效
+        if settings.ai_mock_mode:
             return MockAIAdapter(ai_config)
 
-        return AIBackendAdapter(ai_config)
+        # fail-fast：非 Mock 模式缺失有效 Key 立即报错，避免静默降级成 Mock 掩盖配置问题
+        api_key = ai_config.get("api_key") or ""
+        if api_key in ("", "your-kimi-api-key"):
+            scope = f"租户 {tenant_id}" if tenant_id else "默认 AI 后端"
+            raise RuntimeError(
+                f"{scope} 未配置有效 API Key，且 ai_mock_mode 未开启。"
+                f"请设置 AI_API_KEY 环境变量，或显式开启 AI_MOCK_MODE=true 使用离线 Mock。"
+            )
 
-    @staticmethod
-    def get_backup_adapter() -> AIBackendAdapter:
-        """获取备用AI适配器"""
-        backup_config = {
-            "provider": settings.ai_backup_provider,
-            "base_url": settings.ai_backup_base_url,
-            "api_key": settings.ai_backup_api_key,
-            "model": settings.ai_backup_model,
-            "temperature": 0.3,
-            "max_tokens": 4096
-        }
-        if settings.ai_mock_mode or not backup_config.get("api_key"):
-            return MockAIAdapter(backup_config)
-        return AIBackendAdapter(backup_config)
+        return AIBackendAdapter(ai_config)
