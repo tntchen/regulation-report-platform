@@ -7,8 +7,8 @@
 #   5. 可选：启动 uvicorn 开发服务
 #
 # 用法：
-#   bash scripts/setup_dev.sh              # 全流程（装环境 + 灌数据，不启动服务）
-#   bash scripts/setup_dev.sh --serve      # 全流程 + 最后启动 uvicorn（前台）
+#   bash scripts/setup_dev.sh              # 全流程（装环境 + 前端依赖 + 灌数据，不启动服务）
+#   bash scripts/setup_dev.sh --serve      # 全流程 + 同时启动后端(8080)与前端(5173)，Ctrl+C 一起停
 #   bash scripts/setup_dev.sh --skip-seed  # 只装环境，不灌数据
 #   bash scripts/setup_dev.sh --tfidf      # 跳过 torch/sentence-transformers（装其余依赖，语义检索降级为 tfidf）
 set -euo pipefail
@@ -78,6 +78,18 @@ if [ ! -f .env ] && [ -f .env.example ]; then
   log "已从 .env.example 生成 .env（如需切换 LLM/嵌入服务请自行修改）"
 fi
 
+# ---------- 3.5. 前端依赖 ----------
+if command -v npm >/dev/null 2>&1; then
+  if [ ! -d frontend/node_modules ]; then
+    log "首次安装前端依赖（frontend/npm install）"
+    (cd frontend && npm install)
+  else
+    log "frontend/node_modules 已存在，跳过 npm install"
+  fi
+else
+  err "未找到 npm，跳过前端依赖安装（前端将无法启动；请安装 Node.js 18+ 后重跑）"
+fi
+
 # ---------- 4. 种子数据（幂等） ----------
 if [ "$SKIP_SEED" -eq 0 ]; then
   for s in seed_tenants seed_regulations seed_report_packs seed_terms seed_demo_extra; do
@@ -89,12 +101,20 @@ else
 fi
 
 log "✅ 环境就绪。激活方式: source .venv/bin/activate"
-log "   启动服务: uvicorn backend.main:app --host 0.0.0.0 --port 8080 --reload"
+log "   启动服务: bash scripts/setup_dev.sh --serve（前后端一起起）"
+log "   前端入口: http://localhost:5173  后端API: http://localhost:8080/docs"
 log "   登录账号: admin / Admin@1234（T001+T002）, zhangsan / Zhangsan@1234（仅 T001）"
 log "   走查清单: docs/端到端演示走查清单.md"
 
-# ---------- 5. 可选启动 ----------
+# ---------- 5. 可选启动（前后端一起） ----------
 if [ "$SERVE" -eq 1 ]; then
-  log "启动 uvicorn（前台，Ctrl+C 停止）"
-  exec uvicorn backend.main:app --host 0.0.0.0 --port 8080 --reload
+  if ! command -v npm >/dev/null 2>&1 || [ ! -d frontend/node_modules ]; then
+    err "前端依赖不可用，仅启动后端（8080）"
+    exec uvicorn backend.main:app --host 0.0.0.0 --port 8080 --reload
+  fi
+  log "启动后端 uvicorn（8080）+ 前端 Vite（5173），Ctrl+C 同时停止两者"
+  uvicorn backend.main:app --host 0.0.0.0 --port 8080 --reload &
+  UV_PID=$!
+  trap 'kill $UV_PID 2>/dev/null' EXIT INT TERM
+  cd frontend && exec npm run dev
 fi
