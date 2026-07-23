@@ -21,3 +21,16 @@ try:
     __all__ += ["FieldMapping", "MappingAsset"]
 except ImportError:
     pass
+
+# 历史方案库（范围 D）与词典模型（范围 E，并行开发）：文件就绪后纳入收集，未就绪时静默跳过
+try:
+    from backend.models.solution_case import SolutionCase
+    __all__ += ["SolutionCase"]
+except ImportError:
+    pass
+
+try:
+    from backend.models.term_dict import TermDict
+    __all__ += ["TermDict"]
+except ImportError:
+    pass

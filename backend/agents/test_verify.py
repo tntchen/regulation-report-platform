@@ -12,7 +12,8 @@ Agent 4: 测试验证Agent (Test Verify)
 7 类校验:
   1. 行数校验        目标表行数 > 0，且不大于源表过滤后行数
   2. 非空率校验      关键字段（contract_no/cust_id/loan_balance）非空率 = 100%
-  3. 汇总对账        SUM(loan_balance) 与源表按口径重算的总余额勾稽一致
+  3. 汇总对账        场景包 reconciliation_rules 规则驱动（SQL 片段只读求值 + tolerance 容差），
+                     包缺失/无规则时回退硬编码口径：SUM(loan_balance) 与源表按口径重算勾稽
   4. 重复记录检测    主键 contract_no 无重复
   5. 枚举值域校验    five_classify 等枚举字段取值合法（目标表无该列则 skipped）
   6. 阈值边界抽查    逾期 90 天分界规则：od>=91 整笔本金，od=0 逾期本金为 0
@@ -144,10 +145,15 @@ class TestVerifyAgent(BaseAgent):
     # 7 类校验
     # ============================================
     async def _run_all_checks(self, target_table: str, task_context: dict) -> List[Dict[str, Any]]:
+        # 场景包勾稽规则（配置化对账）：包缺失/无规则时回退硬编码口径，绝不阻断校验
+        from backend.services import report_pack_service
+        pack = await report_pack_service.get_pack_safe(task_context.get("report_pack_id"))
+        recon_rules = (pack or {}).get("reconciliation_rules") or []
+
         return [
             await self._check_row_count(target_table, task_context),
             await self._check_not_null(target_table),
-            await self._check_reconcile(target_table, task_context),
+            await self._check_reconcile(target_table, task_context, recon_rules),
             await self._check_duplicates(target_table),
             await self._check_enum_domain(target_table),
             await self._check_overdue_boundary(target_table),
@@ -204,8 +210,21 @@ class TestVerifyAgent(BaseAgent):
             detail=f"非空率: {rates}"
         )
 
-    async def _check_reconcile(self, target_table: str, task_context: dict) -> Dict[str, Any]:
-        """3. 汇总对账：目标表总余额与源表按EAST口径重算值勾稽"""
+    # 源表标准过滤口径（与硬编码对账一致的演示口径）
+    SOURCE_FILTER = ("is_deleted=0 AND is_test=0 AND org_no='1001' "
+                     "AND product_code IN ('P001','P001-G')")
+    # 缺省余额口径：贷款余额 = 本金余额 + 资本化利息
+    DEFAULT_BALANCE_EXPR = "principal_balance + IFNULL(interest_capitalized, 0)"
+
+    async def _check_reconcile(self, target_table: str, task_context: dict,
+                               rules: list = None) -> Dict[str, Any]:
+        """3. 汇总对账：
+        - 场景包提供了 reconciliation_rules 时，逐条规则在只读通道求值并判定（规则驱动）；
+        - 否则回退硬编码口径（目标表总余额 vs 源表按EAST口径重算），保持存量兼容。
+        """
+        if rules:
+            return await self._check_reconcile_by_rules(target_table, task_context, rules)
+
         tgt = await demo_dataset.aquery(f"SELECT SUM(loan_balance) AS total FROM {target_table}")
         tgt_total = tgt["rows"][0]["total"] or 0
 
@@ -233,6 +252,118 @@ class TestVerifyAgent(BaseAgent):
             critical=True,
             detail=f"目标 {tgt_total} vs 源表 {src_total}，相对差异 {rel:.6%}"
         )
+
+    # ============================================
+    # 规则驱动对账（场景包 reconciliation_rules）
+    # ============================================
+    async def _check_reconcile_by_rules(self, target_table: str, task_context: dict,
+                                        rules: list) -> Dict[str, Any]:
+        """逐条执行场景包勾稽规则：任一规则不通过则整项 fail（关键项）"""
+        source_tables = task_context.get("source_tables") or ["loan_contract"]
+        source_table = source_tables[0]
+
+        results = []
+        for rule in rules:
+            results.append(await self._eval_rule(rule, target_table, source_table))
+
+        failed = [r for r in results if not r["passed"]]
+        return self._check_result(
+            "reconcile", "汇总对账(规则驱动)", "pass" if not failed else "fail",
+            metrics={"rule_results": results,
+                     "rule_count": len(results), "failed_count": len(failed)},
+            samples=[f"规则[{r['name']}] 未通过: 实测 {r['actual']} vs 期望 {r['expected']}，"
+                     f"差异 {r['abs_diff']}{('，错误: ' + r['error']) if r.get('error') else ''}"
+                     for r in failed[:5]],
+            critical=True,
+            detail=f"{len(results)} 条勾稽规则，{len(failed)} 条未通过"
+        )
+
+    async def _eval_rule(self, rule: dict, target_table: str, source_table: str) -> Dict[str, Any]:
+        """求值单条勾稽规则，输出 实测值/期望值/差异/是否通过。
+
+        表达式文法（大小写不敏感，均在只读通道执行）：
+          SUM(col)                                  → 目标表聚合 vs 源表缺省余额口径
+          <聚合片段> = <聚合片段>                    → 左侧在目标表求值，右侧在源表(标准过滤)求值
+          SUM_BY(维度, 度量) [= SUM_BY(维度, 表达式)] → 表内/跨表分组勾稽：各组逐组对比
+        """
+        name = rule.get("name", "未命名规则")
+        expression = (rule.get("expression") or "").strip()
+        tolerance = float(rule.get("tolerance", 0) or 0)
+        result = {"name": name, "expression": expression, "tolerance": tolerance,
+                  "actual": None, "expected": None, "abs_diff": None,
+                  "rel_diff": None, "passed": False}
+        try:
+            # 分组勾稽：SUM_BY(dim, expr)
+            m = re.match(
+                r"(?is)^\s*SUM_BY\(\s*(\w+)\s*,\s*(.+?)\s*\)"
+                r"\s*(?:=\s*SUM_BY\(\s*\w+\s*,\s*(.+?)\s*\)\s*)?$",
+                expression)
+            if m:
+                return await self._eval_group_rule(
+                    result, m.group(1), m.group(2), m.group(3),
+                    target_table, source_table, tolerance)
+
+            # 标量对比：按 = 拆分左右；无 = 时右側取源表缺省余额口径
+            if "=" in expression:
+                left, right = (p.strip() for p in expression.split("=", 1))
+            else:
+                left, right = expression, f"SUM({self.DEFAULT_BALANCE_EXPR})"
+            actual = await self._eval_scalar(target_table, left)
+            expected = await self._eval_scalar(source_table, right, self.SOURCE_FILTER)
+            return self._fill_compare(result, actual, expected, tolerance)
+        except Exception as e:
+            # 规则本身不可执行 → 判不通过并记录错误（不阻断其他规则）
+            result["error"] = str(e)
+            return result
+
+    async def _eval_scalar(self, table: str, expr: str, where: str = None) -> float:
+        """在只读通道执行标量聚合片段（如 SUM(loan_balance) / COUNT(*)）"""
+        sql = f"SELECT {expr} AS v FROM {table}" + (f" WHERE {where}" if where else "")
+        rows = (await demo_dataset.aquery(sql))["rows"]
+        return float(rows[0]["v"] or 0) if rows else 0.0
+
+    def _fill_compare(self, result: dict, actual: float, expected: float,
+                      tolerance: float) -> Dict[str, Any]:
+        """容差判定：绝对差落在 tolerance 内即通过（rel_diff 仅作展示指标）"""
+        diff = abs(actual - expected)
+        rel = diff / abs(expected) if expected else 0.0
+        # 差值先按 6 位小数舍入再与容差比较，消除浮点求和毛刺（如 0.0050000000001）
+        rounded = round(diff, 6)
+        result.update(actual=round(actual, 4), expected=round(expected, 4),
+                      abs_diff=rounded, rel_diff=round(rel, 8),
+                      passed=rounded <= tolerance)
+        return result
+
+    async def _eval_group_rule(self, result: dict, dim: str, t_expr: str, s_expr,
+                               target_table: str, source_table: str,
+                               tolerance: float) -> Dict[str, Any]:
+        """分组勾稽：目标表按维度分组的聚合 vs 源表同维度分组重算，逐组对比"""
+        s_expr = s_expr or self.DEFAULT_BALANCE_EXPR
+        t_rows = (await demo_dataset.aquery(
+            f'SELECT "{dim}" AS g, SUM({t_expr}) AS v FROM {target_table} GROUP BY "{dim}"'
+        ))["rows"]
+        s_rows = (await demo_dataset.aquery(
+            f'SELECT "{dim}" AS g, SUM({s_expr}) AS v FROM {source_table} '
+            f'WHERE {self.SOURCE_FILTER} GROUP BY "{dim}"'
+        ))["rows"]
+
+        t_map = {str(r["g"]): float(r["v"] or 0) for r in t_rows}
+        s_map = {str(r["g"]): float(r["v"] or 0) for r in s_rows}
+        groups = {}
+        worst_diff = 0.0
+        passed = True
+        for g in sorted(set(t_map) | set(s_map)):
+            a, e = t_map.get(g, 0.0), s_map.get(g, 0.0)
+            d = abs(a - e)
+            ok = round(d, 6) <= tolerance
+            passed = passed and ok
+            worst_diff = max(worst_diff, d)
+            groups[g] = {"actual": round(a, 4), "expected": round(e, 4),
+                         "abs_diff": round(d, 6), "passed": ok}
+
+        result.update(actual=groups, expected="见各分组期望值", abs_diff=round(worst_diff, 6),
+                      group_count=len(groups), passed=passed)
+        return result
 
     async def _check_duplicates(self, target_table: str) -> Dict[str, Any]:
         """4. 重复记录检测：contract_no 主键唯一"""

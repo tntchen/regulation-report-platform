@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Card, Table, Tag, Button, Space, Drawer, Descriptions, Modal, Form, Input, Select,
-  message, Typography, Divider, Popconfirm, InputNumber, Checkbox,
+  message, Typography, Divider, Popconfirm, InputNumber, Checkbox, Tabs, Empty,
 } from 'antd'
 import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined } from '@ant-design/icons'
-import { api, ReportPack, TargetSchemaField, ReconciliationRule } from '../api/client'
+import { api, ReportPack, TargetSchemaField, ReconciliationRule, TableProfile } from '../api/client'
 import { useTenant } from '../App'
 
 const PACK_STATUS: Record<string, { color: string; text: string }> = {
@@ -24,6 +24,79 @@ function isAdmin(): boolean {
 }
 
 const EMPTY_FIELD: TargetSchemaField = { field: '', data_type: 'DECIMAL(18,2)', required: true, caliber_text: '' }
+
+/** 详情抽屉 · 源表探查 Tab：选源表 → 全字段画像（空值率/去重数/格式/枚举/样例值） */
+const ProfileTab: React.FC<{ tenantId: string; pack: ReportPack }> = ({ tenantId, pack }) => {
+  const [table, setTable] = useState<string | undefined>(undefined)
+  const [profile, setProfile] = useState<TableProfile | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  const runProfile = async (t: string) => {
+    setTable(t)
+    setLoading(true)
+    try {
+      setProfile(await api.profileTable(tenantId, pack.id, t))
+    } catch (e: any) {
+      setProfile(null)
+      message.error(`探查失败: ${e.message}`)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <>
+      <Space style={{ marginBottom: 12 }}>
+        <span>源表：</span>
+        <Select
+          style={{ width: 260 }} placeholder="选择要探查的源表" value={table}
+          options={(pack.source_tables || []).map((t) => ({ value: t, label: t }))}
+          onChange={runProfile} loading={loading}
+        />
+      </Space>
+      {!profile && !loading && <Empty description="选择源表后展示字段画像" />}
+      <Table
+        rowKey="column_name" size="small" loading={loading} pagination={false}
+        dataSource={profile?.columns || []}
+        scroll={{ x: 900 }}
+        columns={[
+          { title: '字段', dataIndex: 'column_name', width: 150, render: (v: string) => <code>{v}</code> },
+          { title: '类型', dataIndex: 'data_type', width: 110 },
+          {
+            title: '空值率', dataIndex: 'null_rate', width: 90,
+            render: (v?: number) => (v != null ? `${(v * 100).toFixed(1)}%` : '-'),
+          },
+          { title: '去重数', dataIndex: 'distinct_count', width: 80, render: (v?: number) => v ?? '-' },
+          {
+            title: '格式', dataIndex: 'format_pattern', width: 110,
+            render: (v?: string | null) => (v ? <Tag color="geekblue">{v}</Tag> : '-'),
+          },
+          {
+            title: '枚举值', dataIndex: 'enum_values', width: 180,
+            render: (v?: any[] | null) =>
+              v && v.length ? (
+                <Space size={4} wrap>{v.slice(0, 8).map((x) => <Tag key={String(x)}>{String(x)}</Tag>)}</Space>
+              ) : '-',
+          },
+          {
+            title: '样例值', dataIndex: 'sample_values',
+            render: (v?: any[]) =>
+              v && v.length ? (
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {v.slice(0, 3).map((x) => String(x)).join('，')}
+                </Typography.Text>
+              ) : '-',
+          },
+        ]}
+      />
+      {profile?.columns?.[0]?.total_rows != null && (
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          共 {profile.columns[0].total_rows} 行数据
+        </Typography.Text>
+      )}
+    </>
+  )
+}
 
 /** P7 场景包管理：列表 + 详情抽屉 + 新建/编辑（admin） */
 const ReportPacks: React.FC = () => {
@@ -207,7 +280,14 @@ const ReportPacks: React.FC = () => {
         title={detail ? `场景包 ${detail.id} · ${detail.report_name}` : ''}
       >
         {detail && (
-          <>
+          <Tabs
+            defaultActiveKey="info"
+            items={[
+              {
+                key: 'info',
+                label: '基本信息',
+                children: (
+                  <>
             <Descriptions size="small" column={2} bordered>
               <Descriptions.Item label="类型">{detail.report_type}</Descriptions.Item>
               <Descriptions.Item label="状态">{PACK_STATUS[detail.status]?.text || detail.status}</Descriptions.Item>
@@ -239,7 +319,16 @@ const ReportPacks: React.FC = () => {
               </div>
             ))}
             {(detail.reconciliation_rules || []).length === 0 && <span style={{ color: '#bbb' }}>无</span>}
-          </>
+                  </>
+                ),
+              },
+              {
+                key: 'profile',
+                label: '源表探查',
+                children: <ProfileTab tenantId={tenantId} pack={detail} />,
+              },
+            ]}
+          />
         )}
       </Drawer>
 

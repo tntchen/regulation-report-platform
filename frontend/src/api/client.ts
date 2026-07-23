@@ -177,6 +177,55 @@ export interface MappingAsset {
   last_confirmed_at?: string
 }
 
+// ---------- 本轮新增契约（后端并行开发，类型按下述契约对齐） ----------
+
+/** 源表探查：单字段画像 */
+export interface ProfiledColumn {
+  column_name: string
+  data_type: string
+  null_rate?: number          // 空值率 0-1
+  distinct_count?: number     // 去重数
+  sample_values?: any[]       // 样例值
+  format_pattern?: string | null  // 格式识别（证件号/手机号/日期/金额…）
+  enum_values?: any[] | null  // 低基数枚举值
+  total_rows?: number         // 表总行数（各列同值）
+}
+
+/** 源表探查响应：GET /report-packs/{pack_id}/profile?table=xx */
+export interface TableProfile {
+  table: string
+  columns: ProfiledColumn[]
+}
+
+/** 制度版本 diff 结果：POST /regulations/diff */
+export interface RegulationDiffResult {
+  summary: string
+  added_sections: any[]      // 新增段落
+  removed_sections: any[]    // 删除段落
+  changed_sections: any[]    // 修改段落
+  affected_keywords: string[] // 受影响关键词（Tag 云）
+}
+
+/** 新旧逻辑回归结果：POST /twin/regression */
+export interface RegressionResult {
+  old_total: number
+  new_total: number
+  diff_amount: number
+  diff_rate: number
+  top_diffs: any[]           // 差异明细行
+  conclusion: string
+}
+
+/** 相似历史任务：GET /tasks/recommend?report_pack_id=xx */
+export interface SimilarTask {
+  task_id: string
+  report_pack_id: string
+  status: string
+  created_at?: string
+  similarity: number         // 0-1
+  summary?: string
+}
+
 export interface AuditLogItem {
   id: number; timestamp: string; trace_id: string; username?: string
   tenant_id?: string; action: string; resource?: string
@@ -258,6 +307,30 @@ export const api = {
     request<ReportPack>(`/v1/tenants/${tid}/report-packs/${packId}`, {
       method: 'PUT', body: JSON.stringify(payload),
     }),
+
+  // ---------- 源表探查 / 制度预演 / 相似任务（本轮新增契约） ----------
+
+  // 源表探查：场景包内某张源表的全字段画像
+  profileTable: (tid: string, packId: string, table: string) =>
+    request<TableProfile>(
+      `/v1/tenants/${tid}/report-packs/${encodeURIComponent(packId)}/profile?table=${encodeURIComponent(table)}`),
+
+  // 制度版本对比：两份文档 diff
+  diffRegulations: (tid: string, docIdOld: string, docIdNew: string) =>
+    request<RegulationDiffResult>(`/v1/tenants/${tid}/regulations/diff`, {
+      method: 'POST', body: JSON.stringify({ doc_id_old: docIdOld, doc_id_new: docIdNew }),
+    }),
+
+  // 新旧逻辑回归：同一场景包下两段 SQL 的执行结果比对
+  runRegression: (tid: string, payload: { report_pack_id: string; sql_old: string; sql_new: string }) =>
+    request<RegressionResult>(`/v1/tenants/${tid}/twin/regression`, {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
+
+  // 相似历史任务推荐
+  recommendTasks: (tid: string, reportPackId: string) =>
+    request<{ similar_tasks: SimilarTask[] }>(
+      `/v1/tenants/${tid}/tasks/recommend?report_pack_id=${encodeURIComponent(reportPackId)}`),
 
   // ---------- 映射（human-in-the-loop） ----------
   listTaskMappings: (tid: string, taskId: string) =>

@@ -140,6 +140,22 @@ async def list_tasks(tenant_id: str, tenant: dict = Depends(get_tenant)):
     }
 
 
+@router.get("/tenants/{tenant_id}/tasks/recommend")
+async def recommend_tasks(tenant_id: str, report_pack_id: str = "",
+                          limit: int = 5, tenant: dict = Depends(get_tenant)):
+    """推荐相似历史方案（范围 D，只读不写审计）
+
+    同场景包成功案例相似度 1.0 / 同类型报表 0.6，按相似度+时间排序取 Top-N。
+    注意：本路由必须声明在 /tasks/{task_id} 之前，避免被路径参数吃掉。
+    """
+    from backend.services import solution_library
+    if not report_pack_id:
+        raise HTTPException(status_code=400, detail="缺少 report_pack_id 参数")
+    limit = max(1, min(limit, 20))
+    similar = await solution_library.recommend(tenant_id, report_pack_id, limit=limit)
+    return {"similar_tasks": similar}
+
+
 @router.get("/tenants/{tenant_id}/tasks/{task_id}")
 async def get_task(tenant_id: str, task_id: str, tenant: dict = Depends(get_tenant)):
     """获取任务状态（含实时阶段明细；需租户成员权限）"""

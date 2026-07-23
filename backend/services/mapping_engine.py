@@ -2,7 +2,7 @@
 映射推断引擎（设计方案 §2.3）
 
 对每个目标字段 × 每个候选 (source_table, source_field) 计算五通道证据分：
-  1. name     名称相似度：编辑距离 + 拼音首字母（pypinyin 可用时）+ 缩写词典
+  1. name     名称相似度：编辑距离 + 拼音首字母（pypinyin 可用时）+ 缩写词典 + 业务术语词典 hints 子信号
   2. comment  注释语义：BGE 余弦（注释缺失 → 通道为 None，不参与加权）
   3. profile  数据画像：类型兼容 + 值域/枚举与 expected_domain 匹配
   4. semantic 制度语义：caliber_text ↔ (字段名+注释+画像摘要) 的 BGE 余弦
@@ -70,11 +70,14 @@ class MappingEngine:
     """五通道映射推断引擎"""
 
     def __init__(self, db_mcp=None, profiling: ProfilingService = None,
-                 embed_fn=None, weights: Dict[str, float] = None):
+                 embed_fn=None, weights: Dict[str, float] = None,
+                 term_hints: Optional[List[Dict[str, Any]]] = None):
         """
         embed_fn: 文本向量函数（默认复用 vector_service 同款 embedding_service.embed；
                   测试可注入确定性假向量，避免加载模型）
         weights: 五通道权重，缺省 DEFAULT_WEIGHTS
+        term_hints: 术语词条列表 [{term, aliases, field_hints}]；None 时推断前
+                    从术语词典服务加载，加载失败静默降级为空词典
         """
         self.profiling = profiling or ProfilingService(db_mcp)
         self.weights = dict(weights or DEFAULT_WEIGHTS)
@@ -88,6 +91,7 @@ class MappingEngine:
             self._pinyin = lambda s: "".join(lazy_pinyin(s, style=Style.FIRST_LETTER))
         except ImportError:
             self._pinyin = None
+        self._term_hints = term_hints
 
     # ============================================
     # 主入口
@@ -110,6 +114,16 @@ class MappingEngine:
         if history_assets is None:
             history_assets = await self._load_history(pack_id)
 
+        # 术语词典加载（构造未注入时从服务加载；失败静默降级空词典）
+        term_hints = self._term_hints
+        if term_hints is None:
+            try:
+                from backend.services.term_service import load_term_hints_safe
+                term_hints = await load_term_hints_safe()
+            except Exception as e:
+                logger.warning("术语词典不可用，name 通道词典子信号降级: %s", e)
+                term_hints = []
+
         # 候选 (table, column, data_type, comment) 展开
         candidates = self._expand_candidates(schemas, source_tables)
 
@@ -120,7 +134,8 @@ class MappingEngine:
                 continue
             mapping = await self._infer_one(
                 pack_id=pack_id, task_id=task_id, spec=spec,
-                candidates=candidates, history_assets=history_assets, profiles=profiles)
+                candidates=candidates, history_assets=history_assets, profiles=profiles,
+                term_hints=term_hints)
             results.append(mapping)
         return results
 
@@ -130,7 +145,8 @@ class MappingEngine:
     async def _infer_one(self, pack_id: str, task_id: str, spec: Any,
                          candidates: List[Dict[str, Any]],
                          history_assets: List[Dict[str, Any]],
-                         profiles: Optional[Dict[tuple, Dict[str, Any]]]) -> FieldMapping:
+                         profiles: Optional[Dict[tuple, Dict[str, Any]]],
+                         term_hints: Optional[List[Dict[str, Any]]] = None) -> FieldMapping:
         target_field = _getattr(spec, "field")
         caliber_text = _getattr(spec, "caliber_text", "") or ""
         expected_type = _getattr(spec, "data_type", "") or ""
@@ -140,7 +156,8 @@ class MappingEngine:
         for cand in candidates:
             evidence = await self._score_candidate(
                 spec, cand, history_assets, profiles, pack_id,
-                target_field, caliber_text, expected_type, expected_domain)
+                target_field, caliber_text, expected_type, expected_domain,
+                term_hints=term_hints)
             fused = self._fuse(evidence)
             if best is None or fused > best[0]:
                 best = (fused, cand, evidence)
@@ -168,12 +185,16 @@ class MappingEngine:
                                profiles: Optional[Dict[tuple, Dict[str, Any]]],
                                pack_id: str,
                                target_field: str, caliber_text: str,
-                               expected_type: str, expected_domain) -> Dict[str, Optional[float]]:
+                               expected_type: str, expected_domain,
+                               term_hints: Optional[List[Dict[str, Any]]] = None
+                               ) -> Dict[str, Optional[float]]:
         """计算单候选的五通道证据（None 表示通道不可用，不参与加权）"""
         comment = (cand.get("comment") or "").strip()
 
-        # 通道1 名称相似度（纯本地计算）
-        name_score = self._name_score(target_field, caliber_text, cand["column"])
+        # 通道1 名称相似度（纯本地计算 + 术语词典子信号）
+        hint_fields = self._match_term_fields(target_field, caliber_text, term_hints)
+        name_score = self._name_score(target_field, caliber_text, cand["column"],
+                                      term_hint_fields=hint_fields)
 
         # 通道2 注释语义（注释缺失 → None 不计权重）
         if comment:
@@ -213,8 +234,31 @@ class MappingEngine:
     # ============================================
     # 通道实现
     # ============================================
-    def _name_score(self, target_field: str, caliber_text: str, source_field: str) -> float:
-        """名称相似度：编辑距离 / 缩写词典展开命中 / 拼音首字母（可选）三者取优"""
+    # 术语词典命中时的子信号分（并入 name 通道取 max，总分仍不超 1.0）
+    TERM_HIT_SCORE = 0.9
+
+    @staticmethod
+    def _match_term_fields(target_field: str, caliber_text: str,
+                           term_hints: Optional[List[Dict[str, Any]]]) -> set:
+        """目标字段名/口径文本命中术语或别名时，返回命中文词条的 field_hints 并集；
+        词典为空或异常返回空集（静默降级）"""
+        fields = set()
+        if not term_hints:
+            return fields
+        try:
+            haystack = (target_field or "") + (caliber_text or "")
+            haystack_lower = haystack.lower()
+            for t in term_hints:
+                names = [t.get("term") or ""] + list(t.get("aliases") or [])
+                if any(n and (n in haystack or n.lower() in haystack_lower) for n in names):
+                    fields.update(t.get("field_hints") or [])
+        except Exception:
+            return set()
+        return fields
+
+    def _name_score(self, target_field: str, caliber_text: str, source_field: str,
+                    term_hint_fields: Optional[set] = None) -> float:
+        """名称相似度：编辑距离 / 缩写词典展开命中 / 拼音首字母（可选）/ 术语词典 hints 取优"""
         sf = source_field.lower()
         tf = target_field.lower()
 
@@ -241,7 +285,13 @@ class MappingEngine:
             if initials:
                 pinyin_score = SequenceMatcher(None, compact, initials).ratio()
 
-        return round(max(edit, dict_score, pinyin_score), 4)
+        # 4) 术语词典子信号：目标口径命中词条，且候选源字段在该词条 field_hints 中
+        #    （hints 字段实际存在于候选 schema 才可能与 source_field 相等，天然过滤幻觉字段）
+        term_score = 0.0
+        if term_hint_fields and source_field in term_hint_fields:
+            term_score = self.TERM_HIT_SCORE
+
+        return round(min(1.0, max(edit, dict_score, pinyin_score, term_score)), 4)
 
     @staticmethod
     def _profile_score(cand: Dict[str, Any], profile: Dict[str, Any],

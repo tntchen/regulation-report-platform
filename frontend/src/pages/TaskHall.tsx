@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Table, Button, Tag, Modal, Form, Select, Input, message, Space, Card, Progress, Popconfirm } from 'antd'
-import { PlusOutlined, NodeIndexOutlined } from '@ant-design/icons'
+import { Table, Button, Tag, Modal, Form, Select, Input, message, Space, Card, Progress, Popconfirm, Alert, List, Typography } from 'antd'
+import { PlusOutlined, NodeIndexOutlined, HistoryOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
-import { api, TaskBrief, ReportPack } from '../api/client'
+import { api, TaskBrief, ReportPack, SimilarTask } from '../api/client'
 import { useTenant } from '../App'
 
 const STATUS_TAG: Record<string, { color: string; text: string }> = {
@@ -27,13 +27,33 @@ const TaskHall: React.FC = () => {
   const navigate = useNavigate()
   // 幂等键：每次打开"新建任务"弹窗生成一次，弹窗内重复点击/重试都返回同一任务
   const clientRequestId = useRef<string>('')
+  // 相似历史任务：选定场景包后拉取推荐，有结果时在弹窗内提示
+  const [similarTasks, setSimilarTasks] = useState<SimilarTask[]>([])
+  const [similarLoading, setSimilarLoading] = useState(false)
+
   const openCreateModal = () => {
     clientRequestId.current = `web-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    setSimilarTasks([])
     setModalOpen(true)
     // 场景包下拉从后端加载（替换原硬编码模板），缺省 G01
     api.listReportPacks(tenantId)
       .then((r) => setPacks(r.packs.filter((p) => p.status !== 'disabled')))
       .catch((e) => message.warning(`场景包加载失败: ${e.message}`))
+    // 弹窗缺省场景包也预取一次相似任务
+    onPackChange(form.getFieldValue('report_pack_id') || 'G01')
+  }
+
+  // 场景包选择变化时查询相似历史任务（失败静默降级为不提示）
+  const onPackChange = async (packId: string) => {
+    setSimilarLoading(true)
+    try {
+      const r = await api.recommendTasks(tenantId, packId)
+      setSimilarTasks(r.similar_tasks || [])
+    } catch {
+      setSimilarTasks([])
+    } finally {
+      setSimilarLoading(false)
+    }
   }
 
   const load = async () => {
@@ -159,6 +179,7 @@ const TaskHall: React.FC = () => {
             extra="报表定义数据化：目标结构/候选源表/勾稽规则由场景包驱动">
             <Select
               loading={packs.length === 0}
+              onChange={onPackChange}
               options={packs.map((p) => ({
                 value: p.id,
                 label: `${p.id} ${p.report_name}（${p.report_type}）`,
@@ -166,6 +187,34 @@ const TaskHall: React.FC = () => {
               }))}
             />
           </Form.Item>
+          {similarTasks.length > 0 && (
+            <Alert
+              type="info" showIcon icon={<HistoryOutlined />}
+              style={{ marginBottom: 16 }}
+              message={`发现 ${similarTasks.length} 个历史相似任务，可参考其执行情况`}
+              description={
+                <List
+                  size="small" loading={similarLoading}
+                  dataSource={similarTasks}
+                  renderItem={(t: SimilarTask) => (
+                    <List.Item style={{ padding: '4px 0' }}>
+                      <Space size={8} wrap>
+                        <Typography.Text code style={{ fontSize: 12 }}>{t.task_id}</Typography.Text>
+                        <Tag color={STATUS_TAG[t.status]?.color}>{STATUS_TAG[t.status]?.text || t.status}</Tag>
+                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                          {t.created_at ? t.created_at.replace('T', ' ').slice(0, 19) : '-'}
+                        </Typography.Text>
+                        <Tag color="blue">相似度 {(t.similarity * 100).toFixed(0)}%</Tag>
+                        {t.summary && (
+                          <Typography.Text type="secondary" style={{ fontSize: 12 }}>{t.summary}</Typography.Text>
+                        )}
+                      </Space>
+                    </List.Item>
+                  )}
+                />
+              }
+            />
+          )}
           <Form.Item name="target_table" label="目标表（可选，默认随场景包）">
             <Input placeholder="如 rpt_g01_housing_loan" />
           </Form.Item>

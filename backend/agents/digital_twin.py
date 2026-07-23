@@ -222,3 +222,115 @@ class DigitalTwinAgent(BaseAgent):
                            "调节公式：EAST余额 = 1104余额 + 资本化利息"),
             "conclusion": conclusion
         }
+
+    # ============================================
+    # 场景2：新旧逻辑回归（制度版本升级影响量化）
+    # ============================================
+    async def run_regression(self, report_pack: Dict[str, Any],
+                             sql_old: str, sql_new: str) -> Dict[str, Any]:
+        """在演示数据集上分别执行新旧两版转换 SQL，量化口径差异。
+
+        安全路径：
+          1) 两条 SQL 先过只读护栏（AST 白名单，仅 SELECT）；
+          2) 结果物化到 twin_ 前缀临时表（演示库唯一被允许写/删的表族），
+             之后统一走只读通道（database_mcp）取数比对；
+          3) try/finally 兜底删除临时表，不留残留。
+
+        约定：SQL 结果需包含逐笔键列（contract_no，缺省取第一列）与一个数值列
+        （优先 balance/loan_balance/amount 命名，缺省取第一个数值列）。
+
+        返回: {old_total, new_total, diff_amount, diff_rate, top_diffs,
+               level_distribution, conclusion}
+        """
+        from backend.mcp.database_mcp import DatabaseMCPService
+        from backend.utils.sql_guard import validate_readonly_sql
+
+        if not sql_old or not sql_new:
+            raise ValueError("sql_old / sql_new 均不能为空")
+        # 第一层：只读护栏（两条都必须通过才动手）
+        validate_readonly_sql(sql_old)
+        validate_readonly_sql(sql_new)
+
+        await demo_dataset.aensure_seeded()
+        dbmcp = DatabaseMCPService({})
+
+        old_table = "twin_regression_old"
+        new_table = "twin_regression_new"
+        try:
+            # 物化到临时表（twin_ 前缀，drop 有白名单保护）
+            await demo_dataset.aexecute_script([
+                f"CREATE TABLE {old_table} AS {sql_old}",
+                f"CREATE TABLE {new_table} AS {sql_new}",
+            ])
+            # 统一走只读通道取数
+            res_old = await dbmcp.execute_sql(f"SELECT * FROM {old_table}")
+            res_new = await dbmcp.execute_sql(f"SELECT * FROM {new_table}")
+        finally:
+            # 兜底清理，失败不影响主流程
+            for t in (old_table, new_table):
+                try:
+                    await demo_dataset.adrop_table(t)
+                except Exception:
+                    pass
+
+        rows_old = self._normalize_rows(res_old["rows"])
+        rows_new = self._normalize_rows(res_new["rows"])
+
+        # 复用差异分析引擎（按 contract_no 键逐笔比对 + 等级判定）
+        diffs = self._analyze_diff(rows_old, rows_new)
+
+        old_total = round(sum(r["balance"] for r in rows_old), 4)
+        new_total = round(sum(r["balance"] for r in rows_new), 4)
+        diff_amount = round(new_total - old_total, 4)
+        diff_rate = diff_amount / old_total if old_total else 0
+
+        level_dist: Dict[str, int] = {}
+        for d in diffs["records"]:
+            level_dist[d["diff_level"]] = level_dist.get(d["diff_level"], 0) + 1
+
+        pack_name = (report_pack or {}).get("report_name", "未指定场景包")
+        direction = "新口径 > 旧口径" if diff_amount > 0 else (
+            "新口径 < 旧口径" if diff_amount < 0 else "两版逻辑结果一致")
+        conclusion = (
+            f"场景包[{pack_name}] 新旧逻辑回归：旧版总额 {old_total:,.2f}，"
+            f"新版总额 {new_total:,.2f}，差异 {diff_amount:,.2f}（{diff_rate:.4%}），"
+            f"{direction}；{diffs['diff_count']} 笔存在差异"
+            f"（critical {level_dist.get('critical', 0)} / high {level_dist.get('high', 0)}）"
+        )
+
+        return {
+            "report_pack_id": (report_pack or {}).get("id"),
+            "old_total": old_total,
+            "new_total": new_total,
+            "diff_amount": diff_amount,
+            "diff_rate": round(diff_rate, 6),
+            "old_record_count": len(rows_old),
+            "new_record_count": len(rows_new),
+            "level_distribution": level_dist,
+            "top_diffs": diffs["records"][:5],
+            "conclusion": conclusion,
+        }
+
+    @staticmethod
+    def _normalize_rows(rows: List[dict]) -> List[dict]:
+        """把任意 SQL 结果规范化为差异引擎所需的 {contract_no, balance} 行。
+
+        键列：优先 contract_no，否则第一列；数值列：优先 balance/loan_balance/amount
+        命名，否则第一个数值类型列。找不到数值列时抛错（调用方应检查 SQL 形态）。
+        """
+        if not rows:
+            return []
+        cols = list(rows[0].keys())
+        key_col = "contract_no" if "contract_no" in cols else cols[0]
+        val_col = next((c for c in ("balance", "loan_balance", "amount") if c in cols), None)
+        if val_col is None:
+            for c in cols:
+                if c == key_col:
+                    continue
+                if any(isinstance(r.get(c), (int, float)) for r in rows):
+                    val_col = c
+                    break
+        if val_col is None:
+            raise ValueError(f"SQL 结果缺少数值列（列：{cols}），无法做差异量化")
+        return [{"contract_no": str(r.get(key_col)),
+                 "balance": round(float(r.get(val_col) or 0), 4)} for r in rows]

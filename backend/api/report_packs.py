@@ -51,6 +51,64 @@ async def get_report_pack(tenant_id: str, pack_id: str,
     return pack
 
 
+@report_packs_router.get("/tenants/{tenant_id}/report-packs/{pack_id}/profile")
+async def profile_pack_source_table(tenant_id: str, pack_id: str, table: str,
+                                    request: Request,
+                                    tenant: dict = Depends(get_tenant),
+                                    current_user: dict = Depends(get_current_user)):
+    """数据探查：对场景包指定源表执行全字段画像（租户成员可读）
+
+    - table 必须在包 source_tables 白名单内（防任意表探测），否则 400
+    - 画像复用 profiling_service.profile_column（只读通道 + 标识符白名单 + 缓存）
+    - 成功画像写审计 report_pack.profile
+    """
+    pack = await report_pack_service.get_pack(pack_id)
+    if not pack:
+        raise HTTPException(status_code=404, detail="场景包不存在")
+
+    if not table or table not in (pack.get("source_tables") or []):
+        raise HTTPException(
+            status_code=400,
+            detail=f"表 {table!r} 不在场景包 {pack_id} 的源表白名单内",
+        )
+
+    # 表结构（拿列名与数据类型），画像逐列聚合
+    from backend.mcp.database_mcp import DatabaseMCPService
+    from backend.services.profiling_service import ProfilingService
+
+    db_mcp = DatabaseMCPService({"db_type": "sqlite_demo"})
+    schema = await db_mcp.query_schema(table)
+    profiling = ProfilingService(db_mcp)
+
+    columns = []
+    for col in schema["columns"]:
+        p = await profiling.profile_column(table, col["column_name"])
+        if p.get("error"):
+            raise HTTPException(status_code=502,
+                                detail=f"字段 {col['column_name']} 画像失败: {p['error']}")
+        columns.append({
+            "column_name": col["column_name"],
+            "data_type": col["data_type"],
+            "null_rate": p["null_rate"],
+            "distinct_count": p["distinct_count"],
+            "sample_values": p["sample_values"],
+            "format_pattern": p["format_pattern"],
+            "enum_values": p["enum_values"],
+            "total_rows": p["total_rows"],
+        })
+
+    await audit_service.write_audit(
+        action="report_pack.profile",
+        tenant_id=tenant_id,
+        user=current_user,
+        resource=pack_id,
+        detail={"table": table, "column_count": len(columns)},
+        ip=request.client.host if request.client else None,
+    )
+
+    return {"table": table, "columns": columns}
+
+
 @report_packs_router.post("/tenants/{tenant_id}/report-packs")
 async def create_report_pack(tenant_id: str, pack_data: dict, request: Request,
                              tenant: dict = Depends(get_tenant),

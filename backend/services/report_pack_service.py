@@ -50,8 +50,13 @@ BUILTIN_REPORT_PACKS: List[Dict[str, Any]] = [
         ],
         "source_tables": ["loan_contract"],
         "reconciliation_rules": [
-            {"name": "余额勾稽", "expression": "SUM(loan_balance)",
+            # 贷款余额 = 本金余额 + 利息调整（资本化利息），与源表按口径重算勾稽
+            {"name": "贷款余额勾稽",
+             "expression": "SUM(loan_balance) = SUM(principal_balance + IFNULL(interest_capitalized, 0))",
              "tolerance": 0.01},
+            # 笔数勾稽：目标表户数 = 源表有效借据笔数
+            {"name": "借据笔数勾稽", "expression": "COUNT(*) = COUNT(*)",
+             "tolerance": 0},
         ],
         "trap_refs": ["组合贷", "资本化利息"],
         "regulation_keywords": "1104 G01 个人住房贷款 资产负债项目统计 口径",
@@ -81,9 +86,11 @@ BUILTIN_REPORT_PACKS: List[Dict[str, Any]] = [
         ],
         "source_tables": ["loan_contract"],
         "reconciliation_rules": [
-            {"name": "余额勾稽", "expression": "SUM(loan_balance)",
+            {"name": "贷款余额勾稽",
+             "expression": "SUM(loan_balance) = SUM(principal_balance + IFNULL(interest_capitalized, 0))",
              "tolerance": 0.01},
-            {"name": "分类合计勾稽", "expression": "SUM_BY(five_classify, loan_balance)",
+            # 五级分类各项之和 = 贷款总额：按五级分类逐组与源表勾稽
+            {"name": "五级分类合计勾稽", "expression": "SUM_BY(five_classify, loan_balance)",
              "tolerance": 0.01},
         ],
         "trap_refs": ["逾期90天", "五级分类"],
@@ -113,8 +120,12 @@ BUILTIN_REPORT_PACKS: List[Dict[str, Any]] = [
         ],
         "source_tables": ["loan_contract"],
         "reconciliation_rules": [
-            {"name": "余额勾稽", "expression": "SUM(loan_balance)",
+            # 借据金额汇总勾稽：EAST 口径余额（含利息调整）与源表重算一致
+            {"name": "借据余额汇总勾稽",
+             "expression": "SUM(loan_balance) = SUM(principal_balance + IFNULL(interest_capitalized, 0))",
              "tolerance": 0.01},
+            {"name": "借据笔数勾稽", "expression": "COUNT(*) = COUNT(*)",
+             "tolerance": 0},
         ],
         "trap_refs": ["组合贷", "资本化利息", "逾期90天"],
         "regulation_keywords": "EAST 信贷业务借据 个人住房贷款 口径",
@@ -233,12 +244,17 @@ async def update_pack(pack_id: str, updates: Dict[str, Any]) -> Optional[ReportP
 
 
 async def seed_builtin_packs() -> List[str]:
-    """把内置场景包灌入 report_packs 表（幂等：已存在则跳过）
+    """把内置场景包灌入 report_packs 表（upsert 语义：
+    不存在则插入；已存在则更新内置字段，使规则修订随版本生效）
     返回本次新写入的包 ID 列表"""
     created = []
     async with PlatformSessionLocal() as session:
         for pack in BUILTIN_REPORT_PACKS:
-            if await session.get(ReportPack, pack["id"]):
+            existing = await session.get(ReportPack, pack["id"])
+            if existing:
+                # upsert：内置包的定义字段始终跟随代码版本更新
+                for key, value in pack.items():
+                    setattr(existing, key, value)
                 continue
             session.add(ReportPack(created_by="system", **pack))
             created.append(pack["id"])

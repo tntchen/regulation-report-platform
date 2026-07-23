@@ -127,6 +127,12 @@ try:
     app.include_router(report_packs_router, prefix="/v1")
 except Exception as _e:
     logger.warning("report_packs 路由未就绪，跳过注册: %s", _e)
+try:
+    # 制度版本diff + 新旧逻辑回归路由（范围C；并行开发期间兜底跳过不影响主应用）
+    from backend.api.diff import diff_router  # noqa: E402
+    app.include_router(diff_router, prefix="/v1")
+except Exception as _e:
+    logger.warning("diff 路由未就绪，跳过注册: %s", _e)
 
 
 # ============================================

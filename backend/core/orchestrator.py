@@ -279,7 +279,18 @@ class TaskOrchestrator:
         state["checkpoint"] = {"completed": list(completed_outputs.keys()), "next": []}
         await task_service.save_task_state(state)
 
+        # 历史方案库沉淀钩子（范围 D）：容错，沉淀失败绝不阻断任务完成
+        await self._settle_solution_case(state)
+
         return state
+
+    async def _settle_solution_case(self, state: dict):
+        """任务完成时把终态摘要沉淀到历史方案库；任何异常仅记日志"""
+        try:
+            from backend.services import solution_library
+            await solution_library.record_case_from_state(state)
+        except Exception as e:
+            logger.warning("方案案例沉淀失败（不阻断任务）: %s", e)
 
     async def _mapping_confirmation_gate(self, state: dict, task_context: dict,
                                          completed_outputs: dict, start_time: float) -> bool:
