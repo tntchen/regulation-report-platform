@@ -117,6 +117,20 @@ npm run dev
 token 为 JWT（HS256，默认 8 小时过期）；跨租户访问返回 403。
 `SECRET_KEY` 必须从环境变量注入，非 debug 模式缺失时启动报错。
 
+**审计日志（L2-D3）**：
+
+- `audit_logs` 表记录 who / when / tenant / action / resource / detail / ip / result / duration_ms，
+  每条带请求级 `trace_id`（响应头 `X-Trace-ID` 同步返回）。
+- 审计中间件自动记录全部写操作（POST/PUT/DELETE，动作 `http.write`）；
+  关键业务动作手动埋点：`auth.login`（成功/失败）、`task.create`、`mcp.execute_sql`、
+  `document.upload/delete/disable/enable/reindex`、`regulations.reindex`。
+- 审计写库容错：失败仅记 error 日志，不影响业务请求；detail 禁写密码/token（含兜底打码）。
+- 查询接口：`GET /v1/tenants/{tid}/audit-logs`（分页 + action/username/时间过滤，挂租户鉴权）、
+  `GET /v1/tenants/{tid}/audit-logs/actions`（动作类型清单）。
+- 全局 logging（`backend/utils/logging.py`）：控制台 + `data/logs/platform.log`，格式含 trace_id；
+  全局异常处理器对 5xx 返回带 trace_id 的 JSON。
+- 前端侧边菜单"审计日志"页：AntD Table + 动作/用户名过滤 + 服务端分页 + detail 展开。
+
 健康检查：
 
 ```bash
@@ -127,7 +141,8 @@ curl http://127.0.0.1:8080/health
 **演示路径**：打开前端 → 登录（admin / Admin@1234）→ 任务大厅"新建任务"（选 EAST 或 1104 G01 模板）→
 执行页观看 6 Agent 流水线实时跑完（Agent 4/5 并行）→
 点击"六维校验报告"与"数字孪生对比"查看真实数据 →
-侧边菜单进入"向量库维护"，用"检索测试"弹窗验证制度召回效果。
+侧边菜单进入"向量库维护"，用"检索测试"弹窗验证制度召回效果 →
+侧边菜单进入"审计日志"，查看刚才每一步操作的留痕（动作/用户/结果/trace_id）。
 
 ## 冒烟测试（不依赖真实 AI Key、不依赖 MySQL）
 

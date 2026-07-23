@@ -8,6 +8,7 @@ from backend.models.task import Task
 from backend.models.document import RegulationDocument
 from backend.models.regulation import IndexLog, RetrievalFeedback
 from backend.models.user import User, UserTenantBinding
+from backend.models.audit_log import AuditLog
 
 __all__ = ["Tenant", "Task", "RegulationDocument", "IndexLog", "RetrievalFeedback",
-           "User", "UserTenantBinding"]
+           "User", "UserTenantBinding", "AuditLog"]

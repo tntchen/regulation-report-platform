@@ -77,6 +77,12 @@ export interface RetrievalItem {
   content: string; relevance_score: number; source_file: string; chunk_index: number
 }
 
+export interface AuditLogItem {
+  id: number; timestamp: string; trace_id: string; username?: string
+  tenant_id?: string; action: string; resource?: string
+  detail: Record<string, any>; ip?: string; result: string; duration_ms?: number
+}
+
 // ---------- API 方法 ----------
 
 export const api = {
@@ -131,6 +137,20 @@ export const api = {
 
   indexLogs: (tid: string, limit = 10) =>
     request<{ total: number; logs: any[] }>(`/v1/tenants/${tid}/regulations/index-logs?limit=${limit}`),
+
+  // 审计日志
+  auditLogs: (tid: string, params: { page?: number; page_size?: number; action?: string; username?: string }) => {
+    const qs = new URLSearchParams()
+    if (params.page) qs.set('page', String(params.page))
+    if (params.page_size) qs.set('page_size', String(params.page_size))
+    if (params.action) qs.set('action', params.action)
+    if (params.username) qs.set('username', params.username)
+    return request<{ total: number; page: number; page_size: number; logs: AuditLogItem[] }>(
+      `/v1/tenants/${tid}/audit-logs?${qs.toString()}`)
+  },
+
+  auditActions: (tid: string) =>
+    request<{ actions: string[] }>(`/v1/tenants/${tid}/audit-logs/actions`),
 
   // 上传文档（multipart，不走 JSON 封装；需带认证头）
   uploadDocument: async (tid: string, file: File, docType: string) => {

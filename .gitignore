@@ -12,6 +12,7 @@ venv/
 # 运行时数据（任务交付物、数据库文件）
 data/tasks/
 data/tenants/
+data/logs/
 *.db
 *.sqlite3
 

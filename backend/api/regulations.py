@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request
 from sqlalchemy import select
 
 from backend.api.deps import get_tenant
@@ -18,10 +18,20 @@ from backend.config import settings
 from backend.database import PlatformSessionLocal
 from backend.models.document import RegulationDocument
 from backend.models.regulation import IndexLog, RetrievalFeedback
+from backend.services import audit_service
 from backend.services.document_service import parse_document
 from backend.services.vector_service import VectorService
 
 router = APIRouter(tags=["向量库维护"])
+
+
+def _audit_user(request: Request):
+    """从 request.state 取当前用户（由 get_current_user 写入）"""
+    return getattr(request.state, "user", None)
+
+
+def _client_ip(request: Request):
+    return request.client.host if request.client else None
 
 
 # ============================================
@@ -113,6 +123,7 @@ async def _index_one_document(tenant_id: str, doc: dict) -> int:
 @router.post("/tenants/{tenant_id}/regulations/documents")
 async def upload_document(
     tenant_id: str,
+    request: Request,
     file: UploadFile = File(...),
     doc_type: str = Form(...),
     tenant: dict = Depends(get_tenant)
@@ -129,6 +140,8 @@ async def upload_document(
         raise HTTPException(status_code=415, detail=str(e))
 
     doc_id = str(uuid.uuid4())
+    current_user = _audit_user(request) or {}
+    uploader = current_user.get("username", "unknown")
 
     # 保存文件（统一存解析后的文本，保证索引可读）
     upload_dir = os.path.join(settings.upload_dir, tenant_id, "regulations")
@@ -137,12 +150,12 @@ async def upload_document(
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(text_content)
 
-    # 登记元数据
+    # 登记元数据（uploaded_by 记录真实操作人）
     async with PlatformSessionLocal() as session:
         session.add(RegulationDocument(
             id=doc_id, tenant_id=tenant_id, filename=file.filename,
             doc_type=doc_type, file_path=file_path, size=len(content),
-            status="uploaded", uploaded_by="api"
+            status="uploaded", uploaded_by=uploader
         ))
         await session.commit()
     await _log_index(tenant_id, "upload", doc_id, file.filename, "success",
@@ -151,6 +164,17 @@ async def upload_document(
     # 自动索引
     doc = await _get_doc_or_404(tenant_id, doc_id)
     chunk_count = await _index_one_document(tenant_id, doc)
+
+    # 文档上传埋点
+    await audit_service.write_audit(
+        action="document.upload",
+        tenant_id=tenant_id,
+        user=current_user or None,
+        resource=f"{doc_id} {file.filename}",
+        detail={"doc_type": doc_type, "size": len(content),
+                "format": fmt, "chunk_count": chunk_count},
+        ip=_client_ip(request),
+    )
 
     return {
         "doc_id": doc_id,
@@ -211,21 +235,32 @@ async def get_document_detail(tenant_id: str, doc_id: str, tenant: dict = Depend
 
 
 @router.put("/tenants/{tenant_id}/regulations/documents/{doc_id}")
-async def update_document(tenant_id: str, doc_id: str, payload: dict,
+async def update_document(tenant_id: str, doc_id: str, payload: dict, request: Request,
                           tenant: dict = Depends(get_tenant)):
     """更新文档（启用/禁用）"""
-    await _get_doc_or_404(tenant_id, doc_id)
+    doc = await _get_doc_or_404(tenant_id, doc_id)
     is_active = payload.get("is_active")
     async with PlatformSessionLocal() as session:
         row = await session.get(RegulationDocument, doc_id)
         if is_active is not None:
             row.is_active = bool(is_active)
         await session.commit()
+
+        # 启用/禁用埋点
+        await audit_service.write_audit(
+            action="document.disable" if is_active is False else "document.enable",
+            tenant_id=tenant_id,
+            user=_audit_user(request),
+            resource=f"{doc_id} {doc['filename']}",
+            detail={"is_active": row.is_active},
+            ip=_client_ip(request),
+        )
         return {"doc_id": doc_id, "is_active": row.is_active, "status": row.status}
 
 
 @router.delete("/tenants/{tenant_id}/regulations/documents/{doc_id}")
-async def delete_document(tenant_id: str, doc_id: str, tenant: dict = Depends(get_tenant)):
+async def delete_document(tenant_id: str, doc_id: str, request: Request,
+                          tenant: dict = Depends(get_tenant)):
     """删除文档：移除向量索引 + 文件 + 元数据"""
     doc = await _get_doc_or_404(tenant_id, doc_id)
 
@@ -242,6 +277,16 @@ async def delete_document(tenant_id: str, doc_id: str, tenant: dict = Depends(ge
 
     await _log_index(tenant_id, "delete", doc_id, doc["filename"], "success",
                      f"移除切片 {removed_chunks} 个")
+
+    # 文档删除埋点
+    await audit_service.write_audit(
+        action="document.delete",
+        tenant_id=tenant_id,
+        user=_audit_user(request),
+        resource=f"{doc_id} {doc['filename']}",
+        detail={"removed_chunks": removed_chunks},
+        ip=_client_ip(request),
+    )
     return {"doc_id": doc_id, "deleted": True, "removed_chunks": removed_chunks}
 
 
@@ -249,7 +294,7 @@ async def delete_document(tenant_id: str, doc_id: str, tenant: dict = Depends(ge
 # 索引管理
 # ============================================
 @router.post("/tenants/{tenant_id}/regulations/reindex")
-async def reindex_all(tenant_id: str, tenant: dict = Depends(get_tenant)):
+async def reindex_all(tenant_id: str, request: Request, tenant: dict = Depends(get_tenant)):
     """重建全部索引（仅启用状态的文档）"""
     async with PlatformSessionLocal() as session:
         result = await session.execute(
@@ -276,6 +321,18 @@ async def reindex_all(tenant_id: str, tenant: dict = Depends(get_tenant)):
                      "success" if failed == 0 else "failed",
                      f"重建 {len(doc_dicts) - failed}/{len(doc_dicts)} 个文档", duration)
 
+    # 全量重建埋点
+    await audit_service.write_audit(
+        action="regulations.reindex",
+        tenant_id=tenant_id,
+        user=_audit_user(request),
+        resource="全部文档",
+        detail={"rebuilt_docs": len(doc_dicts) - failed, "failed_docs": failed,
+                "total_chunks": total_chunks, "duration_ms": duration},
+        ip=_client_ip(request),
+        result="success" if failed == 0 else "fail",
+    )
+
     return {
         "status": "success" if failed == 0 else "partial_failed",
         "rebuilt_docs": len(doc_dicts) - failed,
@@ -286,10 +343,21 @@ async def reindex_all(tenant_id: str, tenant: dict = Depends(get_tenant)):
 
 
 @router.post("/tenants/{tenant_id}/regulations/documents/{doc_id}/reindex")
-async def reindex_one(tenant_id: str, doc_id: str, tenant: dict = Depends(get_tenant)):
+async def reindex_one(tenant_id: str, doc_id: str, request: Request,
+                      tenant: dict = Depends(get_tenant)):
     """重建单个文档索引"""
     doc = await _get_doc_or_404(tenant_id, doc_id)
     chunk_count = await _index_one_document(tenant_id, doc)
+
+    # 单文档重建埋点
+    await audit_service.write_audit(
+        action="document.reindex",
+        tenant_id=tenant_id,
+        user=_audit_user(request),
+        resource=f"{doc_id} {doc['filename']}",
+        detail={"chunk_count": chunk_count},
+        ip=_client_ip(request),
+    )
     return {"doc_id": doc_id, "status": "indexed", "chunk_count": chunk_count}
 
 

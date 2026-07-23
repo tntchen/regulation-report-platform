@@ -4,7 +4,7 @@ API 公共依赖
 - get_tenant: 认证 + 租户成员校验（非成员 403）
 """
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from backend.core.tenant_context import TenantContext, PRESET_TENANTS
@@ -16,9 +16,10 @@ bearer_scheme = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
 ) -> dict:
-    """解析 Bearer token，返回当前用户（未认证 401）"""
+    """解析 Bearer token，返回当前用户（未认证 401），并写入 request.state 供审计中间件使用"""
     if not credentials:
         raise HTTPException(status_code=401, detail="未认证：缺少 Bearer token",
                             headers={"WWW-Authenticate": "Bearer"})
@@ -32,12 +33,15 @@ async def get_current_user(
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="用户不存在或已停用")
 
-    return {
+    current = {
         "id": user.id,
         "username": user.username,
         "display_name": user.display_name,
         "role": user.role,
     }
+    # 写入 request.state，审计中间件在请求结束后读取
+    request.state.user = current
+    return current
 
 
 async def get_tenant(tenant_id: str = "T001",

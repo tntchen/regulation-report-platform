@@ -4,15 +4,17 @@
 
 import uuid
 from datetime import datetime
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from backend.api.deps import get_tenant
 from backend.core.orchestrator import TaskOrchestrator
+from backend.services import audit_service
 
 router = APIRouter(tags=["任务管理"])
 
 
 @router.post("/tenants/{tenant_id}/tasks")
-async def create_task(tenant_id: str, task_data: dict, tenant: dict = Depends(get_tenant)):
+async def create_task(tenant_id: str, task_data: dict, request: Request,
+                      tenant: dict = Depends(get_tenant)):
     """创建报送任务"""
     task_id = f"TASK_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:6]}"
 
@@ -32,6 +34,22 @@ async def create_task(tenant_id: str, task_data: dict, tenant: dict = Depends(ge
     # 执行任务
     orchestrator = TaskOrchestrator(tenant_id)
     result = await orchestrator.execute_task(task_context)
+
+    # 任务创建埋点
+    await audit_service.write_audit(
+        action="task.create",
+        tenant_id=tenant_id,
+        user=getattr(request.state, "user", None),
+        resource=task_id,
+        detail={
+            "report_type": task_context["report_type"],
+            "report_code": task_context["report_code"],
+            "target_table": task_context["target_table"],
+            "status": result["status"],
+        },
+        ip=request.client.host if request.client else None,
+        result="success" if result["status"] != "failed" else "fail",
+    )
 
     return {
         "task_id": task_id,

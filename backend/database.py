@@ -19,7 +19,7 @@ if settings.database_url.startswith("sqlite"):
 # 平台配置库(SQLite)
 platform_engine = create_async_engine(
     settings.database_url,
-    echo=settings.debug,
+    echo=False,  # SQL 日志由全局 logging 统一管理，避免刷屏
     poolclass=NullPool  # SQLite用NullPool避免并发问题
 )
 

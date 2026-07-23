@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, useNavigate, useLocation, Navigate } from
 import { Layout, Menu, Select, Tag, Space, Typography, Dropdown, Spin } from 'antd'
 import {
   HomeOutlined, DatabaseOutlined, ApartmentOutlined, UserOutlined, LogoutOutlined,
+  FileSearchOutlined,
 } from '@ant-design/icons'
 import { api, auth, TenantBrief } from './api/client'
 import TaskHall from './pages/TaskHall'
@@ -10,6 +11,7 @@ import TaskExecute from './pages/TaskExecute'
 import QualityReport from './pages/QualityReport'
 import DigitalTwin from './pages/DigitalTwin'
 import VectorLibrary from './pages/VectorLibrary'
+import AuditLogs from './pages/AuditLogs'
 import Login from './pages/Login'
 
 const { Header, Sider, Content } = Layout
@@ -108,6 +110,7 @@ const AppShell: React.FC = () => {
               items={[
                 { key: '/', icon: <HomeOutlined />, label: '任务大厅' },
                 { key: '/vectors', icon: <DatabaseOutlined />, label: '向量库维护' },
+                { key: '/audit', icon: <FileSearchOutlined />, label: '审计日志' },
               ]}
               onClick={({ key }) => navigate(key)}
             />
@@ -119,6 +122,7 @@ const AppShell: React.FC = () => {
               <Route path="/quality/:taskId" element={<QualityReport />} />
               <Route path="/twin/:taskId" element={<DigitalTwin />} />
               <Route path="/vectors" element={<VectorLibrary />} />
+              <Route path="/audit" element={<AuditLogs />} />
             </Routes>
           </Content>
         </Layout>
