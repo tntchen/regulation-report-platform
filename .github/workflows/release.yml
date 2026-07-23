@@ -1,6 +1,7 @@
-# Release: 构建多架构镜像并推送到 Docker Hub
+# Release: 构建镜像并推送到 Docker Hub
 # 触发方式：GitHub Actions 手动触发（workflow_dispatch）
 # CI 测试由 ci.yml 负责；release 只负责在测试通过后构建镜像
+# 注意：NAS 为 x86_64，仅构建 linux/amd64 以节省 runner 磁盘空间
 
 name: Release
 
@@ -27,9 +28,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -52,9 +50,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
