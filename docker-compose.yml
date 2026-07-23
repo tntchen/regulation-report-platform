@@ -1,0 +1,66 @@
+version: '3.8'
+
+services:
+  # 平台核心服务
+  platform:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: regulation-platform
+    ports:
+      - "8080:8080"
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:///./data/platform.db
+      - AI_BACKEND_PROVIDER=kimi
+      - AI_BASE_URL=http://host.docker.internal:8000/v1
+      - AI_API_KEY=${AI_API_KEY}
+      - AI_MODEL=kimi-pro
+      - REDIS_URL=redis://redis:6379/0
+      - USE_REDIS=false
+    volumes:
+      - ./data:/app/data
+      - ./backend:/app/backend
+    depends_on:
+      - mysql
+      - redis
+    networks:
+      - platform-network
+    restart: unless-stopped
+
+  # MySQL演示数据库
+  mysql:
+    image: mysql:8.0
+    container_name: regulation-mysql
+    ports:
+      - "3306:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=root123
+      - MYSQL_DATABASE=retail_credit
+      - MYSQL_USER=mcp_readonly
+      - MYSQL_PASSWORD=readonly123
+    volumes:
+      - ./data/init/mysql:/docker-entrypoint-initdb.d
+      - mysql-data:/var/lib/mysql
+    networks:
+      - platform-network
+    restart: unless-stopped
+
+  # Redis缓存(可选)
+  redis:
+    image: redis:7-alpine
+    container_name: regulation-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - platform-network
+    restart: unless-stopped
+
+volumes:
+  mysql-data:
+  redis-data:
+
+networks:
+  platform-network:
+    driver: bridge

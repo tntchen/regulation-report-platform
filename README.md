@@ -1,0 +1,182 @@
+# 银行监管报送智能开发平台 (regulation-report-platform)
+
+参赛 Demo：基于多 Agent 协作的监管报送 ETL 代码智能生成平台。
+Python 3.10 + FastAPI + SQLite（平台库）+ MySQL（租户业务库，MCP 只读接入）。
+
+## 里程碑状态
+
+- **M1**：标准包结构重组 + Agent 1/2/3（制度解析 → 代码生成 → 质量校验）串行流程跑通，
+  质量门禁支持 blocker 阻断回退重试、warning 放行记录。
+- **M2（当前）**：Agent 4/5/6（测试验证 / 数字孪生 / 投产交付）真实实现，6Agent 完整链路打通：
+  Agent 4 与 Agent 5 并行执行；Agent 4 关键项失败同样回退 Agent 2；
+  Agent 6 汇总全链路产出生成 Markdown 交付物至 `data/tasks/{task_id}/`；
+  任务状态实时登记，GET API 可查阶段明细。
+
+## 目录结构
+
+```
+regulation-report-platform/
+├── README.md
+├── requirements.txt
+├── .env.example
+├── Dockerfile
+├── docker-compose.yml
+│
+├── backend/                       # 后端服务包
+│   ├── main.py                    # FastAPI 入口（/health + 挂载 api 路由）
+│   ├── config.py                  # 配置管理（pydantic-settings，支持 .env）
+│   ├── database.py                # 数据库连接（平台库 SQLite + 租户库动态引擎）
+│   │
+│   ├── api/                       # API 路由
+│   │   ├── deps.py                # 公共依赖（租户上下文注入）
+│   │   ├── tenants.py             # 租户管理
+│   │   ├── tasks.py               # 任务管理（创建报送任务，触发 Agent 编排）
+│   │   ├── regulations.py         # 制度文档上传/列表/重建索引/检索测试
+│   │   └── mcp.py                 # MCP 服务（Schema 查询 / 只读 SQL / 制度检索）
+│   │
+│   ├── core/                      # 核心引擎
+│   │   ├── tenant_context.py      # 多租户上下文（ContextVar 隔离 + 预置租户）
+│   │   ├── orchestrator.py        # 任务编排引擎（DAG 调度 + 质量门禁回退重试）
+│   │   └── ai_adapter.py          # AI 适配器（OpenAI 兼容 + 离线 MockAIAdapter）
+│   │
+│   ├── agents/                    # Agent 集群
+│   │   ├── base.py                # Agent 基类（AgentResult/BaseAgent/AgentRegistry）
+│   │   ├── regulation_parser.py   # Agent 1: 制度解析（检索制度、提取口径、识别陷阱）
+│   │   ├── codegen.py             # Agent 2: 代码生成（按口径+Schema 生成转换 SQL）
+│   │   ├── quality_gate.py        # Agent 3: 质量校验（六维校验 + 门禁判定）
+│   │   ├── test_verify.py         # Agent 4: 测试验证（SQLite 真实执行 + 7 类校验脚本）
+│   │   ├── digital_twin.py        # Agent 5: 数字孪生（1104 vs EAST 双口径差异归因）
+│   │   └── deploy.py              # Agent 6: 投产交付（生成 Markdown 交付物）
+│   │
+│   ├── mcp/                       # MCP 服务
+│   │   ├── database_mcp.py        # 数据库 MCP（白名单 Schema 查询 + 只读 SELECT，安全红线）
+│   │   ├── regulation_rag.py      # 制度检索 RAG（内存向量 + 中文子串相关度）
+│   │   └── demo_dataset.py        # SQLite 演示数据集（12 笔贷款种子，含可解释差异）
+│   │
+│   ├── models/                    # SQLAlchemy 数据模型
+│   │   ├── tenant.py / task.py / document.py / regulation.py
+│   │
+│   ├── services/                  # 业务服务层
+│   │   └── task_service.py        # 任务状态登记与查询（内存版，供 API 实时查询）
+│   └── utils/
+│       └── exceptions.py          # 平台自定义异常
+│
+├── scripts/
+│   ├── smoke_test.py              # M1 冒烟测试：3Agent 串行验证
+│   └── smoke_test_m2.py           # M2 冒烟测试：6Agent 全链路 + 门禁回退 + 数字孪生
+│
+└── data/                          # 运行时数据
+    ├── demo_biz.db                # SQLite 演示数据集（首次运行自动播种）
+    └── tasks/{task_id}/           # Agent 6 生成的投产交付物
+```
+
+## 快速开始
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env    # 可选，默认配置即可运行
+
+# 启动服务（默认 8080 端口）
+python -m backend.main
+# 或
+uvicorn backend.main:app --host 0.0.0.0 --port 8080
+```
+
+健康检查：
+
+```bash
+curl http://127.0.0.1:8080/health
+# {"status":"ok","version":"2.0.0"}
+```
+
+## 冒烟测试（不依赖真实 AI Key、不依赖 MySQL）
+
+```bash
+# M1: 3Agent 串行（制度解析→代码生成→质量校验）
+python scripts/smoke_test.py
+
+# M2: 6Agent 全链路 + 门禁回退 + 数字孪生差异
+python scripts/smoke_test_m2.py
+```
+
+M2 冒烟测试覆盖三个场景：
+- **正向**：完整 6Agent 链路，Agent 4/5 并行，Agent 6 生成 4 份 Markdown 交付物并校验文件真实存在
+- **门禁回退**：先坏后好的 Mock（验证 block → 回退 Agent2 → 重试通过，retry=1）；
+  始终违规的 Mock（验证超过 3 次重试后任务 failed）
+- **数字孪生**：校验两口径差异总额 = 15,600 元（与种子数据资本化利息之和勾稽）、归因文字完整
+
+> 离线 Mock 模式：`config.py` 中 `ai_mock_mode=True`（默认开启），或未配置有效
+> `AI_API_KEY` 时，`AIAdapterFactory` 自动返回 `MockAIAdapter`，产出确定性的演示 SQL。
+> 接入真实 AI 服务时，在 `.env` 配置 `AI_BASE_URL` / `AI_API_KEY` 并设置 `AI_MOCK_MODE=false`。
+
+## 通过 API 创建报送任务
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/tenants/T001/tasks \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "report_type": "EAST",
+    "report_code": "EAST_LOAN_01",
+    "section": "个人住房贷款",
+    "source_tables": ["loan_contract"],
+    "target_table": "rpt_east_housing_loan"
+  }'
+```
+
+返回各 Agent 阶段执行明细与质量门禁报告（`outputs.quality_gate`）。
+
+## Agent 3 质量校验（六维）
+
+| 维度 | 校验要点 |
+| --- | --- |
+| 口径合规 | 贷款余额含利息调整部分；Agent 1 识别的 critical 陷阱在代码中有对应处理 |
+| 类型安全 | 金额 ROUND 4 位；利率按 D20.6 ROUND 6 位 |
+| 空值防御 | 可空字段参与运算必须有 IFNULL/COALESCE/CASE 防御 |
+| 性能友好 | 禁止 SELECT *；WHERE 不得对索引列套函数；必须有过滤条件 |
+| 安全合规 | 禁止危险 SQL；必须 is_deleted=0 / is_test=0 / org_no 过滤；C2/C3 字段脱敏 |
+| 监管特殊 | 逾期 90 天分界；公积金组合贷 P001-G 纳入；利率报备 LPR 检查 |
+
+门禁判定：任一 **blocker** → 阻断并回退 Agent 2 重试（最多 3 次，附带自动修正建议）；
+无 blocker 有 **warning** → 放行并记录；全部通过 → 放行。
+
+## Agent 4 测试验证（七项校验）
+
+在 SQLite 演示数据集上真实执行 Agent 2 生成的 SQL（建目标表 → 执行 INSERT...SELECT），再逐项校验：
+
+| 校验项 | 内容 | 关键项 |
+| --- | --- | --- |
+| 行数校验 | 目标表行数 > 0 且 ≤ 源表有效行数 | ✅ |
+| 非空率 | contract_no/cust_id/loan_balance 非空率 100% | ✅ |
+| 汇总对账 | SUM(loan_balance) 与源表按口径重算总额勾稽 | ✅ |
+| 重复记录 | contract_no 主键唯一 | ✅ |
+| 枚举值域 | five_classify ∈ 1-5（目标表无该列则 skipped） | |
+| 90 天边界抽查 | od≥91 整笔本金、od=0 逾期本金为 0 | |
+| 长度截断 | contract_no ≤ 32 字符 | |
+
+关键项 fail → `critical_fail=True` → 编排器回退 Agent 2 重试。
+
+## Agent 5 数字孪生（1104 vs EAST）
+
+同一批贷款种子数据（12 笔，含资本化利息/逾期临界/应剔除样本）按两种口径模拟：
+
+- 口径A（1104 G01）：纯本金余额
+- 口径B（EAST）：账面余额 = 本金 + 资本化利息
+
+差异分析引擎逐笔比对（contract_no 键）：绝对/相对差异、差异等级
+（critical>5% / high>2% / medium>0.5%，阈值取自设计文档 §3.3），
+并输出归因说明（差异方向、制度依据、跨表对账调节公式）。
+
+## Agent 6 投产交付
+
+汇总全部 Agent 产出，在 `data/tasks/{task_id}/` 生成：
+
+- `01_转换逻辑说明.md` —— 任务概述 + 生成 SQL + 转换逻辑要点
+- `02_口径映射表.md` —— 制度依据 + 陷阱清单 + 字段映射
+- `03_校验结论摘要.md` —— 六维门禁结果 + 七项测试结果
+- `04_投产Checklist.md` —— 自动校验项 + 人工确认项 + 孪生差异结论
+
+## 安全红线
+
+- `database_mcp` 仅允许 SELECT 只读查询，内置危险关键字拦截与表白名单；
+- 所有生成代码强制机构权限（org_no）过滤与逻辑删除/测试数据剔除；
+- 测试环境不得使用生产真实客户信息（C2/C3 字段输出需脱敏）。
