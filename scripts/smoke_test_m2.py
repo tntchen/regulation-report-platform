@@ -200,6 +200,8 @@ async def main():
     from backend.core import orchestrator as _  # 触发包导入
     from backend.services import task_service
 
+    await task_service.ensure_task_columns()  # 轻量列迁移（老库补新列）
+
     result_a = await scenario_a()
     await scenario_b()
     await scenario_c(result_a)

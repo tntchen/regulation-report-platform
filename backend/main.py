@@ -26,14 +26,22 @@ async def lifespan(app: FastAPI):
     # 启动: 初始化全局日志 + 创建数据库表 + 初始化演示用户 + 校验密钥配置
     setup_logging()
     from backend.services.auth_service import seed_demo_users
+    from backend.services import task_service
+    from backend.services.task_worker import worker
     from backend.utils.security import get_jwt_secret
     get_jwt_secret()  # 非 debug 模式且未配置 SECRET_KEY 时在此报错
     async with platform_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await task_service.ensure_task_columns()  # 轻量列迁移（老库补新列）
     await seed_demo_users()
+    # 启动任务 worker（恢复中断任务 + 轮询执行 queued 任务）
+    if settings.task_worker_enabled:
+        await worker.start()
     logger.info("平台启动完成 version=%s", settings.app_version)
     yield
-    # 关闭: 清理资源
+    # 关闭: 停止 worker + 清理资源
+    if settings.task_worker_enabled:
+        await worker.stop()
     await platform_engine.dispose()
 
 

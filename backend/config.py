@@ -73,6 +73,11 @@ class Settings(BaseSettings):
     # 任务交付物工作目录
     task_work_dir: str = "./data/tasks"
 
+    # 任务 worker（异步执行引擎）
+    task_worker_enabled: bool = True        # 是否随应用启动内置 worker（外部队列替换时关闭）
+    task_worker_max_concurrency: int = 2    # 全局并发执行上限
+    task_worker_poll_interval: float = 0.5  # 轮询 queued 任务间隔（秒）
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

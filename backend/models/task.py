@@ -38,3 +38,9 @@ class Task(Base):
 
     # 重试次数
     retry_count = Column(Integer, default=0)
+
+    # 异步化与断点恢复（L2-D4）
+    created_by = Column(String(50))                    # 创建人用户名
+    client_request_id = Column(String(64), index=True)  # 幂等键（租户+用户+该ID唯一）
+    cancel_requested = Column(Integer, default=0)       # 取消标记（0/1）
+    checkpoint = Column(JSON, default={})               # 断点：已完成阶段集合 + 下一阶段

@@ -240,6 +240,10 @@ async def scenario_e():
 
 
 async def main():
+    # 轻量列迁移（老库补新列，与 lifespan 行为一致）
+    from backend.services.task_service import ensure_task_columns
+    await ensure_task_columns()
+
     await scenario_a()
     await scenario_b()
     doc_id = await scenario_c()

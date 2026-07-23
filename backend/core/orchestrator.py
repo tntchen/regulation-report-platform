@@ -8,10 +8,14 @@
       → Agent6 投产交付
 
 门禁规则:
-  - Agent 3 block → 回退 Agent 2 重试（最多 MAX_GATE_RETRY 次）
-  - Agent 4 关键项 fail → 回退 Agent 2 重试（同上）
+  - Agent 3 block → 回退重试（最多 MAX_GATE_RETRY 次）
+  - Agent 4 关键项 fail → 回退重试（同上）
+  - 回退从 regulation_parser 重跑：刷新检索上下文，避免基于过期口径重新生成
   - 超过最大重试 → 任务 failed 并记录失败原因
   - warning 放行并记录
+
+L2-D4：任务由后台 worker 异步执行；每层完成即落库断点（checkpoint），
+进程重启后从断点续跑；阶段边界检查取消标记，支持优雅取消。
 
 任务状态通过 task_service 登记，供 API 实时查询阶段明细。
 """
@@ -92,36 +96,72 @@ class TaskOrchestrator:
 
         return agents
 
-    async def execute_task(self, task_context: Dict[str, Any]) -> Dict[str, Any]:
-        """执行任务"""
+    async def execute_task(self, task_context: Dict[str, Any],
+                           resume_state: Dict[str, Any] = None,
+                           should_cancel=None) -> Dict[str, Any]:
+        """执行任务
+
+        resume_state: 断点恢复时传入持久化的任务状态（worker 重启续跑），
+                      已完成阶段不重复执行，从 checkpoint["next"] 指定的阶段续跑。
+        should_cancel: 可选异步回调，阶段边界检查取消标记（任务取消机制）。
+        """
         start_time = time.time()
 
-        # 任务状态
-        state = {
-            "task_id": task_context.get("task_id", ""),
-            "tenant_id": self.tenant_id,
-            "task_type": task_context.get("report_type", "report"),
-            "name": f"{task_context.get('report_type', '')} {task_context.get('report_code', '')} 报送任务".strip(),
-            "status": "executing",
-            "current_stage": "regulation_parser",
-            "progress": 0,
-            "stages": [],
-            "outputs": {},
-            "report_config": task_context,
-            "retry_count": 0,
-            "start_time": start_time
-        }
-        # 登记初始状态（供 API 查询）
+        if resume_state:
+            # 断点恢复：复用已持久化的阶段与产出
+            state = resume_state
+            state["status"] = "executing"
+            state["error"] = None
+            completed_outputs = {k: v for k, v in (state.get("outputs") or {}).items() if v}
+            current_agents = list((state.get("checkpoint") or {}).get("next") or [])
+            if not current_agents:
+                # 断点缺失/损坏：无法安全定位续跑点，明确判 failed
+                state["status"] = "failed"
+                state["error"] = "进程重启后断点信息缺失，无法安全续跑"
+                state["duration_ms"] = int((time.time() - start_time) * 1000)
+                await task_service.save_task_state(state)
+                return state
+        else:
+            # 新任务：初始化状态
+            state = {
+                "task_id": task_context.get("task_id", ""),
+                "tenant_id": self.tenant_id,
+                "task_type": task_context.get("report_type", "report"),
+                "name": f"{task_context.get('report_type', '')} {task_context.get('report_code', '')} 报送任务".strip(),
+                "status": "executing",
+                "current_stage": "regulation_parser",
+                "progress": 0,
+                "stages": [],
+                "outputs": {},
+                "report_config": task_context,
+                "retry_count": 0,
+                "start_time": start_time,
+                "checkpoint": {"completed": [], "next": ["regulation_parser"]},
+            }
+            completed_outputs = {}
+            current_agents = ["regulation_parser"]
+
+        # 登记状态（供 API 查询）
         await task_service.save_task_state(state)
 
-        # 按DAG执行
-        current_agents = ["regulation_parser"]
-        completed_outputs = {}
+        async def _cancelled() -> bool:
+            """阶段边界取消检查"""
+            if should_cancel is None:
+                return False
+            return await should_cancel()
 
-        # 门禁回退标记：本层结束后强制跳转回 codegen
-        rollback_to_codegen = False
+        # 门禁回退标记：本层结束后强制跳转回 regulation_parser 刷新检索上下文
+        rollback_to_parser = False
 
         while current_agents:
+            # 阶段边界：取消检查（优雅终止）
+            if await _cancelled():
+                state["status"] = "cancelled"
+                state["error"] = "任务被用户取消"
+                state["duration_ms"] = int((time.time() - start_time) * 1000)
+                await task_service.save_task_state(state)
+                return state
+
             # 执行当前层Agent（同一层多个Agent时并行执行，如 test_verify + digital_twin）
             layer_results = await asyncio.gather(*[
                 self._execute_agent(agent_name, task_context, completed_outputs)
@@ -152,7 +192,7 @@ class TaskOrchestrator:
                 }
                 state["progress"] = progress_map.get(agent_name, 0)
 
-                # 门禁①：质量校验 block → 回退 codegen
+                # 门禁①：质量校验 block → 回退重试
                 if agent_name == "quality_gate":
                     gate_result = result.output.get("gate_result", "pass")
                     if gate_result == "block":
@@ -163,9 +203,9 @@ class TaskOrchestrator:
                         )
                         if rollback == "failed":
                             return state
-                        rollback_to_codegen = True
+                        rollback_to_parser = True
 
-                # 门禁②：测试验证关键项 fail → 回退 codegen
+                # 门禁②：测试验证关键项 fail → 回退重试
                 elif agent_name == "test_verify":
                     if result.output.get("critical_fail"):
                         rollback = await self._handle_gate_block(
@@ -175,20 +215,25 @@ class TaskOrchestrator:
                         )
                         if rollback == "failed":
                             return state
-                        rollback_to_codegen = True
+                        rollback_to_parser = True
 
                 completed_outputs[agent_name] = result.output
 
-            # 每完成一层，刷新任务状态
+            # 每完成一层，刷新任务状态与断点
+            self._update_checkpoint(state, current_agents, completed_outputs)
             await task_service.save_task_state(state)
 
-            # 门禁阻断：回退到 codegen 重新生成
-            if rollback_to_codegen:
-                rollback_to_codegen = False
-                completed_outputs.pop("quality_gate", None)
-                completed_outputs.pop("test_verify", None)
-                completed_outputs.pop("digital_twin", None)
-                current_agents = ["codegen"]
+            # 门禁阻断：回退到 regulation_parser 重跑（刷新检索上下文，避免过期口径）
+            if rollback_to_parser:
+                rollback_to_parser = False
+                for stale in ("regulation_parser", "codegen", "quality_gate",
+                              "test_verify", "digital_twin"):
+                    completed_outputs.pop(stale, None)
+                    state["outputs"].pop(stale, None)
+                current_agents = ["regulation_parser"]
+                # 回退中的断点：若进程在此死亡，重启后从 regulation_parser 续跑
+                state["checkpoint"] = {"completed": [], "next": ["regulation_parser"]}
+                await task_service.save_task_state(state)
                 continue
 
             # 确定下一层Agent
@@ -199,12 +244,29 @@ class TaskOrchestrator:
                         next_agents.add(next_agent)
 
             current_agents = list(next_agents)
+            # 更新断点：下一阶段
+            state["checkpoint"] = {
+                "completed": list(completed_outputs.keys()),
+                "next": list(current_agents),
+            }
+            await task_service.save_task_state(state)
 
         state["status"] = "completed"
         state["duration_ms"] = int((time.time() - start_time) * 1000)
+        state["checkpoint"] = {"completed": list(completed_outputs.keys()), "next": []}
         await task_service.save_task_state(state)
 
         return state
+
+    @staticmethod
+    def _update_checkpoint(state: dict, finished_layer: list, completed_outputs: dict):
+        """每层完成后更新断点（completed 为已完成 Agent 集合，next 由主循环随后精确计算）"""
+        completed = set((state.get("checkpoint") or {}).get("completed") or [])
+        completed.update(finished_layer)
+        state["checkpoint"] = {
+            "completed": sorted(completed),
+            "next": (state.get("checkpoint") or {}).get("next", []),
+        }
 
     async def _handle_gate_block(self, state: dict, task_context: dict,
                            suggestions: list, start_time: float) -> str:

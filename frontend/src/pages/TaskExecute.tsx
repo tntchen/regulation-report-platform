@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Card, Steps, Tag, Button, Space, Alert, Descriptions, message } from 'antd'
+import { Card, Steps, Tag, Button, Space, Alert, Descriptions, message, Popconfirm } from 'antd'
 import { useNavigate, useParams } from 'react-router-dom'
 import { api, TaskDetail, StageRecord } from '../api/client'
 import { useTenant } from '../App'
@@ -49,12 +49,22 @@ const TaskExecute: React.FC = () => {
     try {
       const t = await api.getTask(tenantId, taskId!)
       setTask(t)
-      if (t.status === 'completed' || t.status === 'failed') {
+      if (t.status === 'completed' || t.status === 'failed' || t.status === 'cancelled') {
         window.clearInterval(timer.current)
       }
     } catch (e: any) {
       window.clearInterval(timer.current)
       message.error(`任务查询失败: ${e.message}`)
+    }
+  }
+
+  const cancel = async () => {
+    try {
+      const r = await api.cancelTask(tenantId, taskId!)
+      message.success(r.message)
+      poll()
+    } catch (e: any) {
+      message.error(`取消失败: ${e.message}`)
     }
   }
 
@@ -92,9 +102,14 @@ const TaskExecute: React.FC = () => {
         title={`任务执行 ${task.task_id}`}
         extra={
           <Space>
-            <Tag color={task.status === 'completed' ? 'success' : task.status === 'failed' ? 'error' : 'processing'}>
-              {task.status === 'completed' ? '已完成' : task.status === 'failed' ? '失败' : '执行中'}
+            <Tag color={task.status === 'completed' ? 'success' : task.status === 'failed' ? 'error' : task.status === 'cancelled' ? 'default' : task.status === 'queued' ? 'gold' : 'processing'}>
+              {task.status === 'completed' ? '已完成' : task.status === 'failed' ? '失败' : task.status === 'cancelled' ? '已取消' : task.status === 'queued' ? '排队中' : '执行中'}
             </Tag>
+            {(task.status === 'queued' || task.status === 'executing') && (
+              <Popconfirm title="确认取消该任务？" onConfirm={cancel}>
+                <Button danger>取消任务</Button>
+              </Popconfirm>
+            )}
             <Button onClick={() => navigate('/')}>返回大厅</Button>
             <Button type="primary" disabled={!task.outputs?.quality_gate}
               onClick={() => navigate(`/quality/${task.task_id}`)}>六维校验报告</Button>

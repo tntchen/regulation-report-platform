@@ -131,6 +131,23 @@ token 为 JWT（HS256，默认 8 小时过期）；跨租户访问返回 403。
   全局异常处理器对 5xx 返回带 trace_id 的 JSON。
 - 前端侧边菜单"审计日志"页：AntD Table + 动作/用户名过滤 + 服务端分页 + detail 展开。
 
+**异步任务模型（L2-D4）**：
+
+- 创建任务异步化：POST 落库 `queued` 立即返回 task_id（秒回），内置 asyncio worker
+  轮询取任务后台执行；并发上限 = 全局 `TASK_WORKER_MAX_CONCURRENCY`（默认 2）与
+  租户 `tenants.max_concurrent_tasks`（无记录时回退全局默认）双重约束。
+- 断点恢复：每个 Agent 层完成即落库 checkpoint（已完成阶段集合 + 下一阶段）；
+  worker 启动时扫描 executing 遗留任务——有断点从下一阶段续跑（已完成阶段不重复执行），
+  无断点从头重跑（各 Agent 产出幂等覆盖），死亡前已请求取消的直接终结 cancelled。
+- 幂等：创建接口接受可选 `client_request_id`（租户+用户+该 ID 唯一），重复提交返回已有任务。
+- 取消：`POST /v1/tenants/{tid}/tasks/{id}/cancel`——queued 直接 cancelled；
+  executing 设置取消标记，编排器在阶段边界检查并优雅终止；审计动作 `task.cancel`。
+- 门禁回退修正：block 回退时从 regulation_parser 重跑，刷新检索上下文，避免过期口径。
+- worker 与请求处理解耦：`run_task()` 为独立执行入口，未来可替换为外部队列
+  （关闭 `TASK_WORKER_ENABLED`，由外部消费者复用同一入口）。
+- 任务状态机新增状态：`queued`（排队中）/`cancelled`（已取消）；前端任务大厅与执行页
+  已适配排队状态展示与"取消任务"按钮。
+
 健康检查：
 
 ```bash

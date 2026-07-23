@@ -108,6 +108,10 @@ export const api = {
   getTask: (tid: string, taskId: string) =>
     request<TaskDetail>(`/v1/tenants/${tid}/tasks/${taskId}`),
 
+  cancelTask: (tid: string, taskId: string) =>
+    request<{ task_id: string; status: string; message: string }>(
+      `/v1/tenants/${tid}/tasks/${taskId}/cancel`, { method: 'POST' }),
+
   listDocuments: (tid: string) =>
     request<{ total: number; documents: RegulationDoc[] }>(`/v1/tenants/${tid}/regulations/documents`),
 
