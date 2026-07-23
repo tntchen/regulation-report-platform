@@ -43,6 +43,30 @@ async def create_task(tenant_id: str, task_data: dict, tenant: dict = Depends(ge
     }
 
 
+@router.get("/tenants/{tenant_id}/tasks")
+async def list_tasks(tenant_id: str):
+    """列出租户任务（按创建时间倒序，供任务大厅展示）"""
+    from backend.services import task_service
+
+    states = await task_service.list_tasks(tenant_id)
+    return {
+        "total": len(states),
+        "tasks": [
+            {
+                "task_id": s["task_id"],
+                "name": s.get("name", ""),
+                "status": s.get("status"),
+                "current_stage": s.get("current_stage"),
+                "progress": s.get("progress"),
+                "retry_count": s.get("retry_count", 0),
+                "duration_ms": s.get("duration_ms", 0),
+                "created_at": s.get("created_at")
+            }
+            for s in states
+        ]
+    }
+
+
 @router.get("/tenants/{tenant_id}/tasks/{task_id}")
 async def get_task(tenant_id: str, task_id: str):
     """获取任务状态（含实时阶段明细）"""

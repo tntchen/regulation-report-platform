@@ -10,9 +10,12 @@ Python 3.10 + FastAPI + SQLite（平台库）+ MySQL（租户业务库，MCP 只
 - **M2**：Agent 4/5/6（测试验证 / 数字孪生 / 投产交付）真实实现，6Agent 完整链路打通：
   Agent 4 与 Agent 5 并行执行；Agent 4 关键项失败同样回退 Agent 2；
   Agent 6 汇总全链路产出生成 Markdown 交付物至 `data/tasks/{task_id}/`。
-- **M3（当前）**：数据与向量库管线落地——任务状态 SQLite 持久化（重启可查）；
+- **M3**：数据与向量库管线落地——任务状态 SQLite 持久化（重启可查）；
   38 份真实制度文档批量导入向量库；"上传→解析→切片→索引→检索测试"闭环；
   向量库维护 API 全量补齐（文档管理/索引重建/检索测试/统计/日志）。
+- **M4（当前）**：React 18 + Ant Design 5 前端，5 个页面对接现有 API：
+  任务大厅 / 任务执行（6Agent 流水线实时轮询）/ 六维校验报告 /
+  数字孪生对比 / 向量库维护（含检索测试弹窗、文档详情、索引日志）。
 
 ## 目录结构
 
@@ -71,6 +74,11 @@ regulation-report-platform/
 │   ├── smoke_test_m3.py           # M3 冒烟测试：向量库管线 + 持久化验证
 │   └── seed_regulations.py        # 38 份真实制度文档批量导入
 │
+├── frontend/                      # React 18 + AntD 5 前端（M4）
+│   ├── src/App.tsx                # 布局：顶部租户切换 + 侧边菜单 + 路由
+│   ├── src/api/client.ts          # API 封装（与后端契约对齐）
+│   └── src/pages/                 # TaskHall/TaskExecute/QualityReport/DigitalTwin/VectorLibrary
+│
 └── data/                          # 运行时数据
     ├── platform.db                # 平台配置库（任务/文档元数据/索引日志）
     ├── demo_biz.db                # SQLite 演示数据集（首次运行自动播种）
@@ -84,10 +92,18 @@ regulation-report-platform/
 pip install -r requirements.txt
 cp .env.example .env    # 可选，默认配置即可运行
 
-# 启动服务（默认 8080 端口）
+# 1. 导入预置制度文档（首次运行）
+python scripts/seed_regulations.py
+
+# 2. 启动后端（默认 8080 端口）
 python -m backend.main
 # 或
 uvicorn backend.main:app --host 0.0.0.0 --port 8080
+
+# 3. 启动前端（另开终端，默认 5173 端口，/v1 与 /health 代理到 8080）
+cd frontend
+npm install
+npm run dev
 ```
 
 健康检查：
@@ -96,6 +112,11 @@ uvicorn backend.main:app --host 0.0.0.0 --port 8080
 curl http://127.0.0.1:8080/health
 # {"status":"ok","version":"2.0.0"}
 ```
+
+**演示路径**：打开前端 → 任务大厅"新建任务"（选 EAST 或 1104 G01 模板）→
+执行页观看 6 Agent 流水线实时跑完（Agent 4/5 并行）→
+点击"六维校验报告"与"数字孪生对比"查看真实数据 →
+侧边菜单进入"向量库维护"，用"检索测试"弹窗验证制度召回效果。
 
 ## 冒烟测试（不依赖真实 AI Key、不依赖 MySQL）
 
