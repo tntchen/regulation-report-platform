@@ -15,10 +15,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # 复制代码
 COPY backend/ ./backend/
-COPY data/ ./data/
 
-# 创建数据目录
-RUN mkdir -p /app/data/tenants
+# 创建运行时数据目录（数据通过 volume 挂载，不在镜像中）
+RUN mkdir -p /app/data/tenants /app/data/tasks /app/data/logs
 
 # 暴露端口
 EXPOSE 8080
