@@ -4,12 +4,35 @@
  */
 
 const BASE = ''
+const TOKEN_KEY = 'access_token'
+
+// ---------- token 存取 ----------
+export const auth = {
+  getToken: () => localStorage.getItem(TOKEN_KEY),
+  setToken: (t: string) => localStorage.setItem(TOKEN_KEY, t),
+  clear: () => {
+    localStorage.removeItem(TOKEN_KEY)
+    localStorage.removeItem('current_user')
+  },
+}
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const token = auth.getToken()
   const resp = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
     ...options,
   })
+  // 401 全局处理：清 token 并跳登录页
+  if (resp.status === 401) {
+    auth.clear()
+    if (!location.pathname.startsWith('/login')) {
+      location.href = '/login'
+    }
+    throw new Error('未认证或登录已过期')
+  }
   if (!resp.ok) {
     const text = await resp.text()
     throw new Error(`API ${resp.status}: ${text.slice(0, 200)}`)
@@ -59,6 +82,13 @@ export interface RetrievalItem {
 export const api = {
   health: () => request<{ status: string; version: string }>('/health'),
 
+  // 认证
+  login: (username: string, password: string) =>
+    request<{ access_token: string; expires_in: number; user: any }>('/v1/auth/login', {
+      method: 'POST', body: JSON.stringify({ username, password }),
+    }),
+  me: () => request<{ user: any; tenants: TenantBrief[] }>('/v1/auth/me'),
+
   listTenants: () => request<{ tenants: TenantBrief[] }>('/v1/tenants'),
 
   listTasks: (tid: string) =>
@@ -102,14 +132,22 @@ export const api = {
   indexLogs: (tid: string, limit = 10) =>
     request<{ total: number; logs: any[] }>(`/v1/tenants/${tid}/regulations/index-logs?limit=${limit}`),
 
-  // 上传文档（multipart，不走 JSON 封装）
+  // 上传文档（multipart，不走 JSON 封装；需带认证头）
   uploadDocument: async (tid: string, file: File, docType: string) => {
     const form = new FormData()
     form.append('file', file)
     form.append('doc_type', docType)
+    const token = auth.getToken()
     const resp = await fetch(`${BASE}/v1/tenants/${tid}/regulations/documents`, {
-      method: 'POST', body: form,
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: form,
     })
+    if (resp.status === 401) {
+      auth.clear()
+      location.href = '/login'
+      throw new Error('未认证或登录已过期')
+    }
     if (!resp.ok) throw new Error(`上传失败: ${(await resp.text()).slice(0, 200)}`)
     return resp.json()
   },

@@ -44,8 +44,8 @@ async def create_task(tenant_id: str, task_data: dict, tenant: dict = Depends(ge
 
 
 @router.get("/tenants/{tenant_id}/tasks")
-async def list_tasks(tenant_id: str):
-    """列出租户任务（按创建时间倒序，供任务大厅展示）"""
+async def list_tasks(tenant_id: str, tenant: dict = Depends(get_tenant)):
+    """列出租户任务（按创建时间倒序，供任务大厅展示；需租户成员权限）"""
     from backend.services import task_service
 
     states = await task_service.list_tasks(tenant_id)
@@ -68,8 +68,8 @@ async def list_tasks(tenant_id: str):
 
 
 @router.get("/tenants/{tenant_id}/tasks/{task_id}")
-async def get_task(tenant_id: str, task_id: str):
-    """获取任务状态（含实时阶段明细）"""
+async def get_task(tenant_id: str, task_id: str, tenant: dict = Depends(get_tenant)):
+    """获取任务状态（含实时阶段明细；需租户成员权限）"""
     from backend.services import task_service
     from fastapi import HTTPException
 

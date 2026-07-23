@@ -17,9 +17,13 @@ from backend.api import api_router
 # 生命周期管理
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动: 创建数据库表
+    # 启动: 创建数据库表 + 初始化演示用户 + 校验密钥配置
+    from backend.services.auth_service import seed_demo_users
+    from backend.utils.security import get_jwt_secret
+    get_jwt_secret()  # 非 debug 模式且未配置 SECRET_KEY 时在此报错
     async with platform_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await seed_demo_users()
     yield
     # 关闭: 清理资源
     await platform_engine.dispose()
@@ -31,10 +35,10 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS
+# CORS（允许源从配置读取，默认仅本地开发源；不使用 "*" + credentials 组合）
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[o.strip() for o in settings.cors_origins.split(",") if o.strip()],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

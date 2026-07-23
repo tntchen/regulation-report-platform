@@ -90,12 +90,12 @@ regulation-report-platform/
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env    # 可选，默认配置即可运行
+cp .env.example .env    # 可选；生产部署必须设置 SECRET_KEY
 
 # 1. 导入预置制度文档（首次运行）
 python scripts/seed_regulations.py
 
-# 2. 启动后端（默认 8080 端口）
+# 2. 启动后端（默认 8080 端口，首次启动自动建表并初始化演示用户）
 python -m backend.main
 # 或
 uvicorn backend.main:app --host 0.0.0.0 --port 8080
@@ -106,6 +106,17 @@ npm install
 npm run dev
 ```
 
+**演示账号**（启动时自动初始化，密码 bcrypt 哈希落库）：
+
+| 账号 | 密码 | 可访问租户 |
+| --- | --- | --- |
+| admin | Admin@1234 | T001 + T002 |
+| zhangsan | Zhangsan@1234 | 仅 T001 |
+
+**认证说明**：除 `/health` 与 `/v1/auth/login` 外全部 API 需 `Authorization: Bearer <token>`；
+token 为 JWT（HS256，默认 8 小时过期）；跨租户访问返回 403。
+`SECRET_KEY` 必须从环境变量注入，非 debug 模式缺失时启动报错。
+
 健康检查：
 
 ```bash
@@ -113,7 +124,7 @@ curl http://127.0.0.1:8080/health
 # {"status":"ok","version":"2.0.0"}
 ```
 
-**演示路径**：打开前端 → 任务大厅"新建任务"（选 EAST 或 1104 G01 模板）→
+**演示路径**：打开前端 → 登录（admin / Admin@1234）→ 任务大厅"新建任务"（选 EAST 或 1104 G01 模板）→
 执行页观看 6 Agent 流水线实时跑完（Agent 4/5 并行）→
 点击"六维校验报告"与"数字孪生对比"查看真实数据 →
 侧边菜单进入"向量库维护"，用"检索测试"弹窗验证制度召回效果。

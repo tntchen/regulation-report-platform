@@ -1,15 +1,16 @@
 import React, { createContext, useContext, useEffect, useState } from 'react'
-import { BrowserRouter, Routes, Route, useNavigate, useLocation } from 'react-router-dom'
-import { Layout, Menu, Select, Tag, Space, Typography } from 'antd'
+import { BrowserRouter, Routes, Route, useNavigate, useLocation, Navigate } from 'react-router-dom'
+import { Layout, Menu, Select, Tag, Space, Typography, Dropdown, Spin } from 'antd'
 import {
-  HomeOutlined, DatabaseOutlined, ApartmentOutlined,
+  HomeOutlined, DatabaseOutlined, ApartmentOutlined, UserOutlined, LogoutOutlined,
 } from '@ant-design/icons'
-import { api, TenantBrief } from './api/client'
+import { api, auth, TenantBrief } from './api/client'
 import TaskHall from './pages/TaskHall'
 import TaskExecute from './pages/TaskExecute'
 import QualityReport from './pages/QualityReport'
 import DigitalTwin from './pages/DigitalTwin'
 import VectorLibrary from './pages/VectorLibrary'
+import Login from './pages/Login'
 
 const { Header, Sider, Content } = Layout
 
@@ -22,21 +23,53 @@ interface TenantCtx {
 const TenantContext = createContext<TenantCtx>({ tenantId: 'T001', tenants: [], setTenantId: () => {} })
 export const useTenant = () => useContext(TenantContext)
 
+/** 路由守卫：未登录跳登录页 */
+const RequireAuth: React.FC<{ children: React.ReactElement }> = ({ children }) => {
+  if (!auth.getToken()) return <Navigate to="/login" replace />
+  return children
+}
+
 const AppShell: React.FC = () => {
   const [tenants, setTenants] = useState<TenantBrief[]>([])
-  const [tenantId, setTenantId] = useState(localStorage.getItem('tenant_id') || 'T001')
+  const [tenantId, setTenantId] = useState(localStorage.getItem('tenant_id') || '')
+  const [user, setUser] = useState<any>(null)
   const [healthy, setHealthy] = useState(false)
+  const [ready, setReady] = useState(false)
   const navigate = useNavigate()
   const location = useLocation()
 
   useEffect(() => {
-    api.listTenants().then((r) => setTenants(r.tenants)).catch(() => {})
     api.health().then(() => setHealthy(true)).catch(() => setHealthy(false))
+    // 从 /auth/me 加载当前用户与有权租户（租户切换器只显示有权限的租户）
+    api.me()
+      .then((r) => {
+        setUser(r.user)
+        setTenants(r.tenants)
+        // 当前租户不在权限范围内时，切换到第一个有权租户
+        const ids = r.tenants.map((t) => t.id)
+        const saved = localStorage.getItem('tenant_id') || ''
+        const next = ids.includes(saved) ? saved : ids[0] || ''
+        setTenantId(next)
+        localStorage.setItem('tenant_id', next)
+      })
+      .catch(() => {})  // 401 已由封装层统一跳登录
+      .finally(() => setReady(true))
   }, [])
 
   const switchTenant = (id: string) => {
     setTenantId(id)
     localStorage.setItem('tenant_id', id)
+  }
+
+  const logout = () => {
+    auth.clear()
+    navigate('/login')
+  }
+
+  if (!ready) {
+    return <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <Spin size="large" tip="加载中…" />
+    </div>
   }
 
   return (
@@ -51,11 +84,19 @@ const AppShell: React.FC = () => {
             <Tag color={healthy ? 'success' : 'error'}>{healthy ? '后端在线' : '后端离线'}</Tag>
             <span style={{ color: '#aab' }}>租户</span>
             <Select
-              value={tenantId}
+              value={tenantId || undefined}
               style={{ width: 180 }}
               onChange={switchTenant}
               options={tenants.map((t) => ({ value: t.id, label: `${t.id} ${t.name}` }))}
             />
+            <Dropdown menu={{
+              items: [{ key: 'logout', icon: <LogoutOutlined />, label: '退出登录', onClick: logout }],
+            }}>
+              <Space style={{ color: '#fff', cursor: 'pointer' }}>
+                <UserOutlined />
+                {user?.display_name || user?.username}
+              </Space>
+            </Dropdown>
           </Space>
         </Header>
         <Layout>
@@ -88,7 +129,10 @@ const AppShell: React.FC = () => {
 
 const App: React.FC = () => (
   <BrowserRouter>
-    <AppShell />
+    <Routes>
+      <Route path="/login" element={<Login />} />
+      <Route path="/*" element={<RequireAuth><AppShell /></RequireAuth>} />
+    </Routes>
   </BrowserRouter>
 )
 

@@ -50,8 +50,13 @@ class Settings(BaseSettings):
     embedding_provider: str = "hash"
 
     # 安全配置
-    secret_key: str = "dev-secret-key"
-    access_token_expire_minutes: int = 30
+    # JWT 密钥：必须从环境变量 SECRET_KEY 注入；debug 模式允许内置开发密钥兜底，
+    # 非 debug 模式缺失时启动报错（见 utils/security.get_jwt_secret）
+    secret_key: str = ""
+    access_token_expire_minutes: int = 480  # token 有效期，默认 8 小时
+
+    # CORS 允许源（逗号分隔，默认仅本地开发源；禁止 "*" + credentials 组合）
+    cors_origins: str = "http://localhost:5173,http://localhost:7100,http://127.0.0.1:5173,http://127.0.0.1:7100"
 
     # 文件上传
     max_upload_size: int = 10 * 1024 * 1024  # 10MB
