@@ -35,7 +35,7 @@ class DigitalTwinAgent(BaseAgent):
         start_time = time.time()
 
         try:
-            demo_dataset.ensure_seeded()
+            await demo_dataset.aensure_seeded()
             source_tables = task_context.get("source_tables", ["loan_contract"])
             source = source_tables[0] if source_tables else "loan_contract"
 
@@ -44,14 +44,14 @@ class DigitalTwinAgent(BaseAgent):
                      "AND product_code IN ('P001','P001-G')")
 
             # 实例A：1104 G01 口径（纯本金余额）
-            instance_a = demo_dataset.query(f"""
+            instance_a = await demo_dataset.aquery(f"""
                 SELECT contract_no,
                        ROUND(principal_balance, 4) AS balance
                 FROM {source} WHERE {where}
             """)
 
             # 实例B：EAST 口径（账面余额 = 本金 + 资本化利息）
-            instance_b = demo_dataset.query(f"""
+            instance_b = await demo_dataset.aquery(f"""
                 SELECT contract_no,
                        ROUND(principal_balance + IFNULL(interest_capitalized, 0), 4) AS balance,
                        IFNULL(interest_capitalized, 0) AS interest_part

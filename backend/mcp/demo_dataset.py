@@ -120,6 +120,44 @@ class DemoDataset:
         finally:
             conn.close()
 
+    def table_info(self, table_name: str) -> List[Dict[str, Any]]:
+        """表结构元数据（PRAGMA table_info，仅供 schema 查询内部使用）"""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cur = conn.execute(f"PRAGMA table_info({table_name})")
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+        finally:
+            conn.close()
+
+    # ============================================
+    # 异步包装（L2-D6：同步 sqlite3 不阻塞事件循环）
+    # ============================================
+    async def aensure_seeded(self):
+        """异步版 ensure_seeded（线程池执行，不阻塞事件循环）"""
+        import asyncio
+        await asyncio.to_thread(self.ensure_seeded)
+
+    async def aquery(self, sql: str, params: tuple = ()) -> Dict[str, Any]:
+        """异步版 query（线程池执行，不阻塞事件循环）"""
+        import asyncio
+        return await asyncio.to_thread(self.query, sql, params)
+
+    async def aexecute_script(self, statements: List[str]):
+        """异步版 execute_script（线程池执行，不阻塞事件循环）"""
+        import asyncio
+        await asyncio.to_thread(self.execute_script, statements)
+
+    async def adrop_table(self, table_name: str):
+        """异步版 drop_table（线程池执行，不阻塞事件循环）"""
+        import asyncio
+        await asyncio.to_thread(self.drop_table, table_name)
+
+    async def atable_info(self, table_name: str) -> List[Dict[str, Any]]:
+        """异步版 table_info（线程池执行，不阻塞事件循环）"""
+        import asyncio
+        return await asyncio.to_thread(self.table_info, table_name)
+
 
 # 模块级共享实例
 demo_dataset = DemoDataset()

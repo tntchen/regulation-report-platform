@@ -148,6 +148,31 @@ token 为 JWT（HS256，默认 8 小时过期）；跨租户访问返回 403。
 - 任务状态机新增状态：`queued`（排队中）/`cancelled`（已取消）；前端任务大厅与执行页
   已适配排队状态展示与"取消任务"按钮。
 
+**数据源与 SQL 只读纵深（L2-D6）**：
+
+- `database_mcp` 真实化：schema 查询走真实元数据（SQLite PRAGMA / MySQL information_schema），
+  `execute_sql` 真实执行并返回结果集（列名+行+截断标记），不再是硬编码桩。
+- 只读三层纵深：
+  1. **AST 白名单**（`utils/sql_guard.py`，sqlglot 解析）：仅放行单语句 SELECT（含 WITH...SELECT）；
+     多语句、写操作、DDL/DCL、INTO OUTFILE/DUMPFILE、LOAD_FILE、危险函数（SLEEP/BENCHMARK/GET_LOCK）
+     一律拒绝；注释不影响判定；解析失败 fail-closed 拒绝。
+  2. **数据库侧最小权限**：生产 MySQL 用 `mcp_readonly` 账号（仅 SELECT，见 `scripts/seed_mysql.py`）；
+     root 不进配置；演示环境物理隔离于 SQLite 演示数据集。
+  3. **执行护栏**：语句超时 10s + 结果行数上限 + 错误信息脱敏（不泄露库表结构细节）。
+- 方言支持矩阵：
+
+  | 方言 | 状态 |
+  | --- | --- |
+  | sqlite_demo（演示数据集） | ✅ 默认路径，真实执行 |
+  | MySQL | ✅ 代码就绪（information_schema + 异步驱动路由）；**真实链路验证待 Docker 环境** |
+  | Oracle / GaussDB | ⚠️ 适配器扩展点，未实现（配置时明确报错而非静默失败） |
+
+- Agent 4 测试验证当前在 SQLite 上执行，属"语法级验证"（代码注释已声明）；
+  Docker MySQL 可用时执行 `scripts/seed_mysql.py` 灌种子后切换数据源 `db_type=mysql` 即可。
+- T002 数据源已修复为 `sqlite_demo`（原 oracle 配置与实现自相矛盾，已消除）。
+- 异步修复：`demo_dataset` 同步 sqlite3 调用全部改为线程池异步包装（aquery/aexecute_script 等），
+  Agent 4/5 不再阻塞事件循环。
+
 健康检查：
 
 ```bash
@@ -287,6 +312,7 @@ python scripts/seed_regulations.py
 
 ## 安全红线
 
-- `database_mcp` 仅允许 SELECT 只读查询，内置危险关键字拦截与表白名单；
+- `database_mcp` 只读纵深三层：sqlglot AST 白名单（仅单语句 SELECT）→ 数据库侧 readonly 账号
+  （仅 SELECT 权限）→ 执行护栏（超时 10s + 行数上限 + 错误脱敏）；表白名单另行约束；
 - 所有生成代码强制机构权限（org_no）过滤与逻辑删除/测试数据剔除；
 - 测试环境不得使用生产真实客户信息（C2/C3 字段输出需脱敏）。

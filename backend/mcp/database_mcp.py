@@ -1,11 +1,30 @@
 """
-MCP服务: database_mcp
-职责: 数据库Schema查询 + 只读SQL执行
+MCP服务: database_mcp（L2-D6 真实化改造）
+职责: 数据库 Schema 查询 + 只读 SQL 执行
+
+只读三层纵深：
+  第一层 AST 白名单（utils/sql_guard.py）：sqlglot 解析，仅单语句 SELECT；
+  第二层 数据库侧最小权限：生产 MySQL 用 readonly 账号连接（见 scripts/seed_mysql.py），
+         演示环境用 SQLite 演示数据集（物理上无业务库可写）；
+  第三层 执行护栏：语句超时（默认 10s）+ 结果行数上限 + 错误信息脱敏。
+
+方言支持：
+  - sqlite_demo：离线演示路径（默认），真实执行于演示数据集
+  - mysql：生产路径（需 Docker MySQL + aiomysql/asyncmy 驱动），走 information_schema
+  - oracle/gaussdb：适配器扩展点，暂未实现（配置时会明确报错而非静默失败）
 """
 
-import re
-from typing import Dict, Any, List
+import asyncio
+from typing import Dict, Any
+
 from backend.config import settings
+from backend.utils.sql_guard import validate_readonly_sql, sanitize_db_error
+from backend.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+# 语句执行超时（秒）
+STATEMENT_TIMEOUT = 10
 
 
 class DatabaseMCPService:
@@ -13,90 +32,183 @@ class DatabaseMCPService:
 
     def __init__(self, db_config: dict = None):
         self.db_config = db_config or {}
+        self.db_type = self.db_config.get("db_type", "sqlite_demo")
         self.readonly = self.db_config.get("readonly", True)
         self.whitelist_tables = self.db_config.get("whitelist_tables", [])
         self.max_limit = settings.mcp_max_limit
 
+    # ============================================
+    # Schema 查询
+    # ============================================
     async def query_schema(self, table_name: str, schema: str = None) -> Dict[str, Any]:
-        """获取表结构"""
-        # 安全检查
+        """获取表结构（白名单校验后走真实元数据）"""
         if self.whitelist_tables and table_name not in self.whitelist_tables:
             raise PermissionError(f"表 {table_name} 不在白名单中")
 
-        # 模拟返回（实际应查询数据库）
-        # 这里返回预置的loan_contract表结构
-        if table_name == "loan_contract":
-            return {
-                "table_name": table_name,
-                "schema": schema or "retail_credit",
-                "columns": [
-                    {"column_name": "contract_no", "data_type": "VARCHAR(32)", "is_nullable": "NO", "column_comment": "合同编号", "is_pk": True, "is_index": True},
-                    {"column_name": "cust_id", "data_type": "VARCHAR(20)", "is_nullable": "NO", "column_comment": "客户ID", "is_pk": False, "is_index": True},
-                    {"column_name": "product_code", "data_type": "VARCHAR(10)", "is_nullable": "YES", "column_comment": "产品代码", "is_pk": False, "is_index": False},
-                    {"column_name": "loan_amount", "data_type": "DECIMAL(18,2)", "is_nullable": "NO", "column_comment": "贷款金额(元)", "is_pk": False, "is_index": False},
-                    {"column_name": "principal_balance", "data_type": "DECIMAL(18,2)", "is_nullable": "NO", "column_comment": "本金余额", "is_pk": False, "is_index": False},
-                    {"column_name": "interest_capitalized", "data_type": "DECIMAL(18,2)", "is_nullable": "YES", "column_comment": "资本化利息", "is_pk": False, "is_index": False},
-                    {"column_name": "execute_rate", "data_type": "DECIMAL(10,6)", "is_nullable": "YES", "column_comment": "执行利率", "is_pk": False, "is_index": False},
-                    {"column_name": "loan_status", "data_type": "VARCHAR(2)", "is_nullable": "NO", "column_comment": "贷款状态", "is_pk": False, "is_index": True},
-                    {"column_name": "repay_date", "data_type": "DATE", "is_nullable": "YES", "column_comment": "应还日期", "is_pk": False, "is_index": False},
-                    {"column_name": "overdue_days", "data_type": "INT", "is_nullable": "YES", "column_comment": "逾期天数", "is_pk": False, "is_index": False},
-                    {"column_name": "five_classify", "data_type": "VARCHAR(1)", "is_nullable": "YES", "column_comment": "五级分类", "is_pk": False, "is_index": False},
-                    {"column_name": "biz_date", "data_type": "DATE", "is_nullable": "NO", "column_comment": "业务日期", "is_pk": False, "is_index": True},
-                    {"column_name": "org_no", "data_type": "VARCHAR(10)", "is_nullable": "NO", "column_comment": "机构号", "is_pk": False, "is_index": True},
-                    {"column_name": "is_deleted", "data_type": "TINYINT(1)", "is_nullable": "NO", "column_default": "0", "column_comment": "是否删除", "is_pk": False, "is_index": False},
-                    {"column_name": "is_test", "data_type": "TINYINT(1)", "is_nullable": "NO", "column_default": "0", "column_comment": "是否测试", "is_pk": False, "is_index": False}
-                ],
-                "indexes": [
-                    {"index_name": "idx_contract_no", "column_names": ["contract_no"], "is_unique": True},
-                    {"index_name": "idx_biz_date_org", "column_names": ["biz_date", "org_no"], "is_unique": False}
-                ]
-            }
+        if self.db_type == "sqlite_demo":
+            return await self._query_schema_sqlite(table_name)
+        if self.db_type == "mysql":
+            return await self._query_schema_mysql(table_name, schema)
+        raise ValueError(
+            f"数据源类型 {self.db_type} 暂未实现（方言扩展点：当前支持 sqlite_demo / mysql）"
+        )
 
-        elif table_name == "customer_info":
-            return {
-                "table_name": table_name,
-                "schema": schema or "retail_credit",
-                "columns": [
-                    {"column_name": "cust_id", "data_type": "VARCHAR(20)", "is_nullable": "NO", "column_comment": "客户ID", "is_pk": True, "is_index": True},
-                    {"column_name": "cust_name", "data_type": "VARCHAR(100)", "is_nullable": "YES", "column_comment": "客户姓名", "is_pk": False, "is_index": False},
-                    {"column_name": "id_card", "data_type": "VARCHAR(18)", "is_nullable": "YES", "column_comment": "身份证号", "is_pk": False, "is_index": False},
-                    {"column_name": "phone", "data_type": "VARCHAR(20)", "is_nullable": "YES", "column_comment": "手机号", "is_pk": False, "is_index": False}
-                ],
-                "indexes": [
-                    {"index_name": "idx_cust_id", "column_names": ["cust_id"], "is_unique": True}
-                ]
-            }
+    async def _query_schema_sqlite(self, table_name: str) -> Dict[str, Any]:
+        """SQLite 演示数据集：PRAGMA 读取真实表结构"""
+        from backend.mcp.demo_dataset import demo_dataset
 
-        return {"table_name": table_name, "columns": [], "indexes": []}
+        await demo_dataset.aensure_seeded()
+        cols = await demo_dataset.atable_info(table_name)
+        if not cols:
+            return {"table_name": table_name, "schema": "demo", "columns": [], "indexes": []}
 
-    async def execute_sql(self, sql: str, limit: int = 100) -> Dict[str, Any]:
-        """执行只读SQL"""
-        # 安全检查1: 必须是SELECT
-        sql_upper = sql.strip().upper()
-        if not sql_upper.startswith("SELECT"):
-            raise PermissionError("只允许执行SELECT查询")
-
-        # 安全检查2: 禁止危险关键字
-        forbidden_keywords = ["INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE", "ALTER", "CREATE", "GRANT", "INTO OUTFILE", "LOAD_FILE"]
-        for keyword in forbidden_keywords:
-            if keyword in sql_upper:
-                raise PermissionError(f"SQL包含禁止关键字: {keyword}")
-
-        # 安全检查3: 限制返回行数
-        if limit > self.max_limit:
-            limit = self.max_limit
-
-        # 模拟执行（实际应连接数据库）
-        # 返回模拟数据
+        type_map = {"contract_no": "VARCHAR(32)", "cust_id": "VARCHAR(20)"}
         return {
-            "columns": ["product_code", "cnt"],
-            "rows": [
-                {"product_code": "P001", "cnt": 500},
-                {"product_code": "P001-G", "cnt": 80},
-                {"product_code": "P002", "cnt": 250},
-                {"product_code": "P003", "cnt": 120},
-                {"product_code": "P004", "cnt": 50}
+            "table_name": table_name,
+            "schema": "demo",
+            "columns": [
+                {
+                    "column_name": c["name"],
+                    "data_type": type_map.get(c["name"], (c["type"] or "TEXT").upper()),
+                    "is_nullable": "NO" if c["notnull"] else "YES",
+                    "column_comment": "",
+                    "is_pk": bool(c["pk"]),
+                    "is_index": bool(c["pk"]),
+                }
+                for c in cols
             ],
-            "row_count": 5,
-            "execution_time_ms": 45
+            "indexes": [],
         }
+
+    async def _query_schema_mysql(self, table_name: str, schema: str = None) -> Dict[str, Any]:
+        """MySQL 生产路径：information_schema 读取真实表结构"""
+        from sqlalchemy import text
+        from backend.database import get_tenant_engine
+
+        database = schema or self.db_config.get("database", "")
+        try:
+            engine = get_tenant_engine(self._mysql_url())
+        except Exception as e:
+            raise RuntimeError(f"MySQL 连接不可用（需 Docker 环境与异步驱动）: {sanitize_db_error(e)}")
+
+        sql = text(
+            "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_COMMENT "
+            "FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA = :db AND TABLE_NAME = :tbl ORDER BY ORDINAL_POSITION"
+        )
+        try:
+            async with engine.connect() as conn:
+                rows = (await conn.execute(sql, {"db": database, "tbl": table_name})).mappings().all()
+        except Exception as e:
+            logger.error("information_schema 查询失败: %s", e)
+            raise RuntimeError(f"表结构查询失败: {sanitize_db_error(e)}")
+
+        return {
+            "table_name": table_name,
+            "schema": database,
+            "columns": [
+                {
+                    "column_name": r["COLUMN_NAME"],
+                    "data_type": r["COLUMN_TYPE"].upper(),
+                    "is_nullable": r["IS_NULLABLE"],
+                    "column_comment": r["COLUMN_COMMENT"] or "",
+                    "is_pk": r["COLUMN_KEY"] == "PRI",
+                    "is_index": r["COLUMN_KEY"] in ("PRI", "MUL"),
+                }
+                for r in rows
+            ],
+            "indexes": [],
+        }
+
+    # ============================================
+    # 只读 SQL 执行
+    # ============================================
+    async def execute_sql(self, sql: str, limit: int = 100) -> Dict[str, Any]:
+        """执行只读 SQL（三层纵深：AST 白名单 → 只读连接 → 超时/行限/脱敏）"""
+        # 第一层：AST 白名单
+        validate_readonly_sql(sql)
+
+        # 第三层：行数上限
+        limit = min(limit, self.max_limit)
+
+        if self.db_type == "sqlite_demo":
+            return await self._execute_sqlite(sql, limit)
+        if self.db_type == "mysql":
+            return await self._execute_mysql(sql, limit)
+        raise ValueError(
+            f"数据源类型 {self.db_type} 暂未实现（方言扩展点：当前支持 sqlite_demo / mysql）"
+        )
+
+    async def _execute_sqlite(self, sql: str, limit: int) -> Dict[str, Any]:
+        """SQLite 演示数据集真实执行（线程池 + 超时 + 行限）"""
+        from backend.mcp.demo_dataset import demo_dataset
+
+        await demo_dataset.aensure_seeded()
+        start = asyncio.get_event_loop().time()
+        try:
+            # 第三层：语句超时
+            result = await asyncio.wait_for(
+                demo_dataset.aquery(sql), timeout=STATEMENT_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            raise TimeoutError("查询执行超时，已终止")
+        except PermissionError:
+            raise
+        except Exception as e:
+            logger.error("SQL 执行失败: %s | SQL: %s", e, sql[:200])
+            raise RuntimeError(sanitize_db_error(e))
+
+        rows = result["rows"][:limit]
+        return {
+            "columns": result["columns"],
+            "rows": rows,
+            "row_count": len(rows),
+            "truncated": result["row_count"] > limit,
+            "execution_time_ms": int((asyncio.get_event_loop().time() - start) * 1000),
+        }
+
+    async def _execute_mysql(self, sql: str, limit: int) -> Dict[str, Any]:
+        """MySQL 生产路径真实执行（连接池 + 超时 + 行限）"""
+        from sqlalchemy import text
+        from backend.database import get_tenant_engine
+
+        try:
+            engine = get_tenant_engine(self._mysql_url())
+        except Exception as e:
+            raise RuntimeError(f"MySQL 连接不可用（需 Docker 环境与异步驱动）: {sanitize_db_error(e)}")
+
+        start = asyncio.get_event_loop().time()
+        try:
+            async with engine.connect() as conn:
+                result = await asyncio.wait_for(
+                    conn.execute(text(sql)), timeout=STATEMENT_TIMEOUT
+                )
+                columns = list(result.keys())
+                rows = [dict(zip(columns, r)) for r in result.fetchmany(limit)]
+        except asyncio.TimeoutError:
+            raise TimeoutError("查询执行超时，已终止")
+        except Exception as e:
+            logger.error("MySQL 执行失败: %s | SQL: %s", e, sql[:200])
+            raise RuntimeError(sanitize_db_error(e))
+
+        return {
+            "columns": columns,
+            "rows": rows,
+            "row_count": len(rows),
+            "truncated": len(rows) >= limit,
+            "execution_time_ms": int((asyncio.get_event_loop().time() - start) * 1000),
+        }
+
+    def _mysql_url(self) -> str:
+        """构建 MySQL 异步连接 URL（优先 asyncmy，其次 aiomysql）"""
+        host = self.db_config.get("host", "localhost")
+        port = self.db_config.get("port", 3306)
+        database = self.db_config.get("database", "")
+        username = self.db_config.get("username", "")
+        password = self.db_config.get("password", "")
+        try:
+            import asyncmy  # noqa: F401
+            driver = "asyncmy"
+        except ImportError:
+            driver = "aiomysql"
+        return f"mysql+{driver}://{username}:{password}@{host}:{port}/{database}"

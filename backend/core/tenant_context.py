@@ -85,12 +85,9 @@ PRESET_TENANTS = {
             {
                 "source_id": "DS001",
                 "source_name": "零售信贷主库",
-                "db_type": "mysql",
-                "host": "10.0.2.100",
-                "port": 3306,
-                "database": "retail_credit",
-                "username": "mcp_readonly",
-                "password": "",
+                # sqlite_demo = 离线演示数据集（真实执行）；
+                # 生产部署改为 mysql 并指向真实只读实例（见 scripts/seed_mysql.py）
+                "db_type": "sqlite_demo",
                 "readonly": True,
                 "whitelist_tables": ["loan_contract", "customer_info", "repay_plan", "product_mapping"]
             }
@@ -126,14 +123,10 @@ PRESET_TENANTS = {
             {
                 "source_id": "DS002",
                 "source_name": "对公业务主库",
-                "db_type": "oracle",
-                "host": "10.0.2.200",
-                "port": 1521,
-                "service_name": "CORPDB",
-                "username": "mcp_readonly",
-                "password": "",
+                # 与 T001 同一演示数据集（Demo 裁剪）；生产部署改为 mysql 独立 schema
+                "db_type": "sqlite_demo",
                 "readonly": True,
-                "whitelist_tables": ["corporate_loan", "enterprise_info"]
+                "whitelist_tables": ["loan_contract"]
             }
         ],
         "regulation_config": {

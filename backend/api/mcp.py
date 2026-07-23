@@ -23,10 +23,26 @@ async def query_schema(tenant_id: str, table_name: str, tenant: dict = Depends(g
 @router.post("/tenants/{tenant_id}/mcp/database/execute_sql")
 async def execute_sql(tenant_id: str, sql: str, request: Request, limit: int = 100,
                       tenant: dict = Depends(get_tenant)):
-    """执行只读SQL（银行安全红线：仅允许 SELECT）"""
+    """执行只读SQL（三层纵深：AST 白名单 → 只读连接 → 超时/行限/脱敏）"""
+    from fastapi import HTTPException
+
     db_config = tenant.get("data_sources", [{}])[0]
     mcp = DatabaseMCPService(db_config)
-    result = await mcp.execute_sql(sql, limit)
+
+    try:
+        result = await mcp.execute_sql(sql, limit)
+    except PermissionError as e:
+        # 安全拒绝：403 + 审计（result=fail）
+        await audit_service.write_audit(
+            action="mcp.execute_sql",
+            tenant_id=tenant_id,
+            user=getattr(request.state, "user", None),
+            resource=db_config.get("source_id", ""),
+            detail={"sql": sql[:200], "limit": limit, "reject_reason": str(e)},
+            ip=request.client.host if request.client else None,
+            result="fail",
+        )
+        raise HTTPException(status_code=403, detail=str(e))
 
     # SQL 执行埋点（截断 SQL 文本，避免审计膨胀）
     await audit_service.write_audit(

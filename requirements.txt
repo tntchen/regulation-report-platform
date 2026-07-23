@@ -34,3 +34,10 @@ greenlet==3.0.3
 # 开发调试
 pytest==8.2.2
 pytest-asyncio==0.23.7
+
+# SQL 只读纵深（L2-D6）
+sqlglot>=26.0.0
+
+# MySQL 生产路径（可选：Docker 环境启用真实链路时安装）
+# asyncmy>=0.2.9
+# pymysql>=1.1.0  # 种子脚本 scripts/seed_mysql.py 使用

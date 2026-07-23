@@ -3,6 +3,12 @@ Agent 4: 测试验证Agent (Test Verify)
 职责: 在 SQLite 演示数据集上真实执行 Agent 2 生成的转换SQL，并运行 7 类校验脚本，
      产出结构化测试报告。关键项失败（critical_fail）触发编排器回退 Agent 2。
 
+方言声明（L2-D6）：
+  生成 SQL 标注为 MySQL 方言，但当前校验执行在 SQLite 演示数据集上进行，
+  属于"语法级验证"（SQLite 与 MySQL 在 IFNULL/类型等方面基本兼容，但非完全等价）。
+  Docker MySQL 环境可用时，校验执行应切换到 MySQL 路径（见 scripts/seed_mysql.py），
+  该切换点预留于 database_mcp 的 db_type 路由。
+
 7 类校验:
   1. 行数校验        目标表行数 > 0，且不大于源表过滤后行数
   2. 非空率校验      关键字段（contract_no/cust_id/loan_balance）非空率 = 100%
@@ -60,8 +66,8 @@ class TestVerifyAgent(BaseAgent):
                 )
 
             # 准备演示数据集 + 装载目标表
-            demo_dataset.ensure_seeded()
-            load_error = self._load_target_table(sql, target_table)
+            await demo_dataset.aensure_seeded()
+            load_error = await self._load_target_table(sql, target_table)
 
             checks = []
             if load_error:
@@ -73,7 +79,7 @@ class TestVerifyAgent(BaseAgent):
                     critical=True
                 ))
             else:
-                checks = self._run_all_checks(target_table, task_context)
+                checks = await self._run_all_checks(target_table, task_context)
 
             # 汇总
             failed = [c for c in checks if c["status"] == "fail"]
@@ -113,10 +119,10 @@ class TestVerifyAgent(BaseAgent):
     # ============================================
     # 目标表装载
     # ============================================
-    def _load_target_table(self, sql: str, target_table: str) -> str:
+    async def _load_target_table(self, sql: str, target_table: str) -> str:
         """解析 INSERT 语句列清单，建表并执行生成的转换SQL。返回错误信息或空串"""
         try:
-            demo_dataset.drop_table(target_table)
+            await demo_dataset.adrop_table(target_table)
 
             # 解析 INSERT INTO t (col1, col2, ...) 的列清单
             match = re.search(r"insert\s+into\s+\w+\s*\(([^)]*)\)", sql, re.IGNORECASE)
@@ -128,8 +134,8 @@ class TestVerifyAgent(BaseAgent):
             cols = [c.strip().strip("`") for c in col_block.split(",") if c.strip()]
             col_defs = ", ".join(f'"{c}"' for c in cols)  # SQLite 无类型列，动态接受任意值
 
-            demo_dataset.execute_script([f'CREATE TABLE {target_table} ({col_defs})'])
-            demo_dataset.execute_script([sql.rstrip().rstrip(";")])
+            await demo_dataset.aexecute_script([f'CREATE TABLE {target_table} ({col_defs})'])
+            await demo_dataset.aexecute_script([sql.rstrip().rstrip(";")])
             return ""
         except Exception as e:
             return str(e)
@@ -137,26 +143,26 @@ class TestVerifyAgent(BaseAgent):
     # ============================================
     # 7 类校验
     # ============================================
-    def _run_all_checks(self, target_table: str, task_context: dict) -> List[Dict[str, Any]]:
+    async def _run_all_checks(self, target_table: str, task_context: dict) -> List[Dict[str, Any]]:
         return [
-            self._check_row_count(target_table, task_context),
-            self._check_not_null(target_table),
-            self._check_reconcile(target_table, task_context),
-            self._check_duplicates(target_table),
-            self._check_enum_domain(target_table),
-            self._check_overdue_boundary(target_table),
-            self._check_length_truncation(target_table),
+            await self._check_row_count(target_table, task_context),
+            await self._check_not_null(target_table),
+            await self._check_reconcile(target_table, task_context),
+            await self._check_duplicates(target_table),
+            await self._check_enum_domain(target_table),
+            await self._check_overdue_boundary(target_table),
+            await self._check_length_truncation(target_table),
         ]
 
-    def _check_row_count(self, target_table: str, task_context: dict) -> Dict[str, Any]:
+    async def _check_row_count(self, target_table: str, task_context: dict) -> Dict[str, Any]:
         """1. 行数校验：目标表行数>0，且不超过源表有效行数"""
-        tgt = demo_dataset.query(f"SELECT COUNT(*) AS cnt FROM {target_table}")
+        tgt = await demo_dataset.aquery(f"SELECT COUNT(*) AS cnt FROM {target_table}")
         tgt_cnt = tgt["rows"][0]["cnt"]
 
         src_cnt = None
         source_tables = task_context.get("source_tables", [])
         if source_tables:
-            src = demo_dataset.query(
+            src = await demo_dataset.aquery(
                 f"SELECT COUNT(*) AS cnt FROM {source_tables[0]} "
                 f"WHERE is_deleted=0 AND is_test=0 AND org_no='1001' "
                 f"AND product_code IN ('P001','P001-G')"
@@ -172,12 +178,12 @@ class TestVerifyAgent(BaseAgent):
             detail=f"目标表 {tgt_cnt} 行，源表有效行 {src_cnt} 行"
         )
 
-    def _check_not_null(self, target_table: str) -> Dict[str, Any]:
+    async def _check_not_null(self, target_table: str) -> Dict[str, Any]:
         """2. 非空率校验：关键字段非空率必须 100%"""
         rates = {}
         bad_samples = []
         for field in self.REQUIRED_FIELDS:
-            r = demo_dataset.query(
+            r = await demo_dataset.aquery(
                 f"SELECT COUNT(*) AS total, SUM(CASE WHEN \"{field}\" IS NULL THEN 1 ELSE 0 END) AS nulls "
                 f"FROM {target_table}"
             )
@@ -186,7 +192,7 @@ class TestVerifyAgent(BaseAgent):
             rate = (total - nulls) / total if total else 1.0
             rates[field] = round(rate, 4)
             if rate < 1.0:
-                s = demo_dataset.query(
+                s = await demo_dataset.aquery(
                     f"SELECT contract_no FROM {target_table} WHERE \"{field}\" IS NULL LIMIT 3"
                 )
                 bad_samples.extend([f"{field} 为 NULL: {row}" for row in s["rows"]])
@@ -198,9 +204,9 @@ class TestVerifyAgent(BaseAgent):
             detail=f"非空率: {rates}"
         )
 
-    def _check_reconcile(self, target_table: str, task_context: dict) -> Dict[str, Any]:
+    async def _check_reconcile(self, target_table: str, task_context: dict) -> Dict[str, Any]:
         """3. 汇总对账：目标表总余额与源表按EAST口径重算值勾稽"""
-        tgt = demo_dataset.query(f"SELECT SUM(loan_balance) AS total FROM {target_table}")
+        tgt = await demo_dataset.aquery(f"SELECT SUM(loan_balance) AS total FROM {target_table}")
         tgt_total = tgt["rows"][0]["total"] or 0
 
         source_tables = task_context.get("source_tables", [])
@@ -208,7 +214,7 @@ class TestVerifyAgent(BaseAgent):
             return self._check_result("reconcile", "汇总对账", "skipped",
                                       metrics={}, samples=[], detail="未提供源表，跳过对账")
 
-        src = demo_dataset.query(
+        src = await demo_dataset.aquery(
             f"SELECT ROUND(SUM(principal_balance + IFNULL(interest_capitalized, 0)), 4) AS total "
             f"FROM {source_tables[0]} "
             f"WHERE is_deleted=0 AND is_test=0 AND org_no='1001' "
@@ -228,9 +234,9 @@ class TestVerifyAgent(BaseAgent):
             detail=f"目标 {tgt_total} vs 源表 {src_total}，相对差异 {rel:.6%}"
         )
 
-    def _check_duplicates(self, target_table: str) -> Dict[str, Any]:
+    async def _check_duplicates(self, target_table: str) -> Dict[str, Any]:
         """4. 重复记录检测：contract_no 主键唯一"""
-        r = demo_dataset.query(
+        r = await demo_dataset.aquery(
             f"SELECT contract_no, COUNT(*) AS cnt FROM {target_table} "
             f"GROUP BY contract_no HAVING COUNT(*) > 1 LIMIT 5"
         )
@@ -244,16 +250,16 @@ class TestVerifyAgent(BaseAgent):
             detail=f"重复主键 {len(dups)} 个"
         )
 
-    def _check_enum_domain(self, target_table: str) -> Dict[str, Any]:
+    async def _check_enum_domain(self, target_table: str) -> Dict[str, Any]:
         """5. 枚举值域校验：five_classify ∈ 1-5（目标表无此列则跳过）"""
-        cols = demo_dataset.query(f"SELECT * FROM {target_table} LIMIT 1")["columns"]
+        cols = (await demo_dataset.aquery(f"SELECT * FROM {target_table} LIMIT 1"))["columns"]
         if "five_classify" not in cols:
             return self._check_result(
                 "enum_domain", "枚举值域校验", "skipped",
                 metrics={}, samples=[],
                 detail="目标表未包含 five_classify 字段，跳过枚举校验"
             )
-        r = demo_dataset.query(
+        r = await demo_dataset.aquery(
             f"SELECT five_classify, COUNT(*) AS cnt FROM {target_table} "
             f"WHERE five_classify NOT IN ('1','2','3','4','5') GROUP BY five_classify LIMIT 5"
         )
@@ -265,9 +271,9 @@ class TestVerifyAgent(BaseAgent):
             detail=f"非法枚举 {len(bad)} 类"
         )
 
-    def _check_overdue_boundary(self, target_table: str) -> Dict[str, Any]:
+    async def _check_overdue_boundary(self, target_table: str) -> Dict[str, Any]:
         """6. 阈值边界抽查：逾期 90 天分界规则落实"""
-        cols = demo_dataset.query(f"SELECT * FROM {target_table} LIMIT 1")["columns"]
+        cols = (await demo_dataset.aquery(f"SELECT * FROM {target_table} LIMIT 1"))["columns"]
         if "overdue_principal" not in cols:
             return self._check_result(
                 "overdue_boundary", "逾期90天边界抽查", "skipped",
@@ -276,7 +282,7 @@ class TestVerifyAgent(BaseAgent):
             )
 
         # 目标表与源表按 contract_no 关联，验证边界规则
-        r = demo_dataset.query(
+        r = await demo_dataset.aquery(
             f"SELECT t.contract_no, s.overdue_days, t.overdue_principal, s.principal_balance "
             f"FROM {target_table} t JOIN loan_contract s ON t.contract_no = s.contract_no"
         )
@@ -300,9 +306,9 @@ class TestVerifyAgent(BaseAgent):
             detail=f"抽查 {checked} 行，违规 {len(violations)} 行"
         )
 
-    def _check_length_truncation(self, target_table: str) -> Dict[str, Any]:
+    async def _check_length_truncation(self, target_table: str) -> Dict[str, Any]:
         """7. 类型/长度截断检测：contract_no ≤ 32 字符"""
-        r = demo_dataset.query(
+        r = await demo_dataset.aquery(
             f"SELECT contract_no, LENGTH(contract_no) AS len FROM {target_table} "
             f"WHERE LENGTH(contract_no) > 32 LIMIT 5"
         )
