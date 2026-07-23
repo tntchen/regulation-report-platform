@@ -122,8 +122,16 @@ regulation-report-platform/
 
 ## 快速开始
 
-> 一键方式：`bash scripts/setup_dev.sh`（建 venv + 装依赖 + 灌演示数据，加 `--serve` 直接起服务）。
-> 运行机制与参数详见 `docs/开发环境一键脚本说明.md`。以下为手工分步方式：
+```bash
+bash scripts/setup_dev.sh --serve
+# 浏览器打开 http://localhost:5173 → 登录（admin / Admin@1234）→ 任务大厅"新建任务"一键演示
+```
+
+一条命令完成：建 venv → 装后端/前端依赖 → 灌演示数据 → 前后端同起（后端 8080 / 前端 5173，Ctrl+C 一起停）。
+参数（`--skip-seed` / `--tfidf`）、运行机制与排错见 `docs/开发环境一键脚本说明.md`。
+
+<details>
+<summary>手工分步方式（不想用脚本时展开）</summary>
 
 ```bash
 pip install -r requirements.txt
@@ -144,6 +152,8 @@ npm run dev
 
 # 4. 浏览器打开前端 → 登录（admin / Admin@1234）→ 任务大厅"新建任务"一键演示
 ```
+
+</details>
 
 **演示账号**（由 `scripts/seed_tenants.py` 初始化，密码 bcrypt 哈希落库）：
 
