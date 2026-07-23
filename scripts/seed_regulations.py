@@ -105,7 +105,7 @@ async def main():
 
     print("\n" + "=" * 60)
     print(f"导入完成: 成功 {success} / 失败 {len(failed)} / 总切片 {total_chunks}")
-    stats = vs.stats()
+    stats = await vs.stats()
     print(f"向量库统计: 文档 {stats['indexed_docs']} / 向量 {stats['vector_count']} / 维度 {stats['vector_dimension']}")
     if failed:
         for name, err in failed:

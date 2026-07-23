@@ -43,11 +43,20 @@ class Settings(BaseSettings):
     ai_backup_model: str = "qwen-72b"
 
     # 向量库配置
-    vector_store_type: str = "faiss"
-    vector_dimension: int = 768
-    embedding_model: str = "text2vec-large-chinese"
-    # Embedding 提供方: hash=本地伪向量(离线Demo) / remote=真实AI后端(替换点)
-    embedding_provider: str = "hash"
+    vector_store_type: str = "sqlite"      # 切片与向量存储：sqlite（租户独立 vectors.db）
+    vector_dimension: int = 512            # 向量维度（与 embedding 模型一致：BGE-small-zh=512）
+    embedding_model: str = "BAAI/bge-small-zh-v1.5"
+    # Embedding 提供方: local=本地 sentence-transformers 语义模型(默认) /
+    # remote=OpenAI 兼容 embedding 端点 / tfidf=字符 n-gram TF-IDF 兜底(无模型依赖)
+    embedding_provider: str = "local"
+    # remote provider 配置（缺省复用 AI 后端配置）
+    embedding_remote_base_url: str = ""
+    embedding_remote_api_key: str = ""
+    embedding_remote_model: str = ""
+    # 双通道融合检索权重与阈值
+    retrieval_vector_weight: float = 0.7   # 向量余弦通道权重
+    retrieval_text_weight: float = 0.3     # bigram 文本通道权重
+    retrieval_threshold: float = 0.15      # 融合分召回阈值
 
     # 安全配置
     # JWT 密钥：必须从环境变量 SECRET_KEY 注入；debug 模式允许内置开发密钥兜底，

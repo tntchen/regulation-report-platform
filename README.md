@@ -55,7 +55,7 @@ regulation-report-platform/
 │   │
 │   ├── mcp/                       # MCP 服务
 │   │   ├── database_mcp.py        # 数据库 MCP（白名单 Schema 查询 + 只读 SELECT，安全红线）
-│   │   ├── regulation_rag.py      # 制度检索 RAG（内存向量 + 中文子串相关度）
+│   │   ├── regulation_rag.py      # 制度检索 RAG（双通道融合 + 禁用文档默认过滤）
 │   │   └── demo_dataset.py        # SQLite 演示数据集（12 笔贷款种子，含可解释差异）
 │   │
 │   ├── models/                    # SQLAlchemy 数据模型
@@ -63,7 +63,8 @@ regulation-report-platform/
 │   │
 │   ├── services/                  # 业务服务层
 │   │   ├── task_service.py        # 任务状态持久化（SQLite，重启可查）
-│   │   ├── vector_service.py      # 租户级向量索引（语义切片 + hash 向量 + 中文检索）
+│   │   ├── embedding_service.py   # Embedding 服务（local=BGE 语义模型 / remote / tfidf 兜底）
+│   │   ├── vector_service.py      # 租户级向量索引（SQLite 存储 + 双通道融合检索）
 │   │   └── document_service.py    # 上传文档解析（TXT/MD 直读，PDF/DOCX 视环境）
 │   └── utils/
 │       └── exceptions.py          # 平台自定义异常
@@ -173,6 +174,26 @@ token 为 JWT（HS256，默认 8 小时过期）；跨租户访问返回 403。
 - 异步修复：`demo_dataset` 同步 sqlite3 调用全部改为线程池异步包装（aquery/aexecute_script 等），
   Agent 4/5 不再阻塞事件循环。
 
+**真实向量检索与索引一致性（L2-D8）**：
+
+- Embedding 真实化（`services/embedding_service.py`，provider 配置真正生效）：
+  - `local`（默认）：sentence-transformers 本地模型 BAAI/bge-small-zh-v1.5（512 维，L2 归一化）；
+    **首次运行需联网下载模型**（约 100MB，HF 缓存后离线可用）；模型加载失败自动降级 tfidf 并记日志。
+  - `remote`：OpenAI 兼容 embedding 端点（`embedding_remote_base_url/api_key/model`），生产替换点。
+  - `tfidf`：sklearn HashingVectorizer 字符 n-gram 兜底（无模型依赖、确定性，远优于原 md5 伪向量）。
+- 双通道融合检索：`relevance = 0.7 × vector_score（语义余弦） + 0.3 × text_score（中文 bigram 文本命中）`，
+  权重与阈值由 `retrieval_vector_weight / retrieval_text_weight / retrieval_threshold` 配置；
+  同义召回实测："逾期90天的房贷如何分类" 命中 G11 五级分类 vector_score 0.697（旧纯文本通道低于阈值必漏）。
+- 索引存储 SQLite 化：`data/tenants/{tid}/vectors/vectors.db`（aiosqlite，chunks 表；
+  `index_document` 单事务原子写，崩溃不留半状态；旧 chunks.json 启动时一次性自动迁移）。
+- 索引一致性修复：`rag.retrieve` 未显式传 `active_doc_ids` 时默认只查启用文档，
+  修掉"禁用文档仍被 RAG 召回"的 bug（租户无登记文档时不过滤，保留预置文档兜底）。
+- 检索评测基线（`scripts/eval_retrieval.py`，16 条评测集）：
+  **Top-1 13/16 (81%) | Top-3 16/16 | Top-5 16/16**。
+- 前端检索测试弹窗展示 融合/向量/文本 三通道得分 Tag。
+- 推理稳定性：torch 限制单线程 + 进程级推理锁串行化 encode
+  （torch 原生层在多事件循环/多线程并发推理下会 segfault，已在代码注释声明）。
+
 健康检查：
 
 ```bash
@@ -198,6 +219,12 @@ python scripts/smoke_test_m2.py
 # M3: 向量库管线（需先执行种子导入）
 python scripts/seed_regulations.py   # 导入 38 份真实制度文档
 python scripts/smoke_test_m3.py
+
+# 检索评测基线（L2-D8，16 条评测集）
+python scripts/eval_retrieval.py     # Top-1 81% / Top-3 100% / Top-5 100%
+
+# pytest 全量（76 用例；离线环境建议加 HF_HUB_OFFLINE=1 避免 HF 网络探测）
+HF_HUB_OFFLINE=1 python -m pytest tests/ -q
 ```
 
 M2 冒烟测试覆盖三个场景：
@@ -281,13 +308,14 @@ curl -X POST http://127.0.0.1:8080/v1/tenants/T001/tasks \
 **数据流**：上传 → 解析（TXT/MD 直读；PDF/DOCX 视环境，缺库时明确报"暂不支持"）
 → 语义切片（按标题/段落，chunk_size≈512，overlap≈50）→ 向量化索引。
 
-**存储**：文档元数据落 SQLite（regulation_documents 表）；向量索引落租户独立目录
-`data/tenants/{tenant_id}/vectors/chunks.json`（租户物理隔离）。
-Embedding 为可替换点：默认 `embedding_provider=hash`（离线确定性伪向量），
-接入真实 embedding 服务时替换 `VectorService.embed()` 即可。
+**存储**：文档元数据落 SQLite（regulation_documents 表）；向量索引落租户独立 SQLite
+`data/tenants/{tenant_id}/vectors/vectors.db`（租户物理隔离，单事务原子写）。
+Embedding 方案见上文 L2-D8：默认 `embedding_provider=local`（BGE-small-zh-v1.5 真实语义向量），
+可切换 `remote`（OpenAI 兼容端点）或降级 `tfidf`。
 
-**检索打分**：中文 bigram 子串命中 + 英文/数字词命中 + 标题加成，
-支持 `active_doc_ids` 过滤实现禁用文档不召回。
+**检索打分**：双通道融合——语义余弦 × 0.7 + 中文 bigram 文本命中 × 0.3（阈值/权重可配置），
+结果含 `vector_score / text_score / relevance_score` 三个字段；
+支持 `active_doc_ids` 过滤实现禁用文档不召回（RAG 侧默认即只查启用文档）。
 
 **预置制度导入**：
 

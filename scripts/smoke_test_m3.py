@@ -44,7 +44,7 @@ async def scenario_a():
     indexed = [d for d in docs if d.status == "indexed"]
     total_chunks = sum(d.chunk_count for d in docs)
     vs = VectorService(TENANT_ID)
-    stats = vs.stats()
+    stats = await vs.stats()
 
     print(f"元数据文档数: {len(docs)}, indexed: {len(indexed)}")
     print(f"切片总数(元数据): {total_chunks}, 向量库向量数: {stats['vector_count']}")
@@ -72,7 +72,7 @@ async def scenario_b():
 
     all_hit = True
     for query, keywords in cases:
-        result = vs.retrieve(query, top_k=5)
+        result = await vs.retrieve(query, top_k=5)
         top = result["results"]
         print(f"\n问题: {query}  (耗时 {result['elapsed_ms']}ms, 命中 {result['total_found']} 条)")
         for i, r in enumerate(top[:3]):
@@ -128,7 +128,7 @@ async def scenario_c():
         ))
         await session.commit()
 
-    result = vs.retrieve("绿色贷款认定标准", top_k=5, active_doc_ids=None)
+    result = await vs.retrieve("绿色贷款认定标准", top_k=5, active_doc_ids=None)
     hit = any(r["doc_id"] == doc_id for r in result["results"])
     print(f"新文档 {filename} 切片 {idx['chunk_count']} 个")
     print(f"检索'绿色贷款认定标准'召回新文档: {'✅' if hit else '❌'}")
@@ -166,7 +166,7 @@ async def scenario_d(doc_id):
         active_ids = {r[0] for r in result.all()}
 
     vs = VectorService(TENANT_ID)
-    result = vs.retrieve("绿色贷款认定标准", top_k=5, active_doc_ids=active_ids)
+    result = await vs.retrieve("绿色贷款认定标准", top_k=5, active_doc_ids=active_ids)
     hit = any(r["doc_id"] == doc_id for r in result["results"])
     print(f"禁用后召回: {'❌ 仍被召回' if hit else '✅ 不再召回'}")
     assert not hit, "禁用文档仍被召回"

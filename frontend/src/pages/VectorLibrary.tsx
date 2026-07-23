@@ -213,7 +213,9 @@ const VectorLibrary: React.FC = () => {
                   <Space direction="vertical" size={2} style={{ width: '100%' }}>
                     <Space>
                       <Tag color="blue">#{r.rank}</Tag>
-                      <Tag color="geekblue">相关度 {r.relevance_score}</Tag>
+                      <Tag color="geekblue">融合 {r.relevance_score}</Tag>
+                      <Tag color="purple">向量 {r.vector_score ?? '-'}</Tag>
+                      <Tag color="cyan">文本 {r.text_score ?? '-'}</Tag>
                       <b>{r.doc_title}</b>
                       <Tag>{r.doc_type}</Tag>
                     </Space>

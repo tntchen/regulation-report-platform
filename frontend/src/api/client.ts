@@ -75,6 +75,7 @@ export interface VectorStats {
 export interface RetrievalItem {
   rank: number; doc_id: string; doc_type: string; doc_title: string
   content: string; relevance_score: number; source_file: string; chunk_index: number
+  vector_score?: number; text_score?: number  // L2-D8 双通道得分
 }
 
 export interface AuditLogItem {

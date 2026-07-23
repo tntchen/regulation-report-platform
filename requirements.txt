@@ -38,6 +38,12 @@ pytest-asyncio==0.23.7
 # SQL 只读纵深（L2-D6）
 sqlglot>=26.0.0
 
+# 语义向量检索（L2-D8）：local provider 默认路径
+# 注意：torch 体积较大（CPU 版约 200MB+）；不装时 embedding_provider 可切 tfidf 兜底，
+# 或配 remote（OpenAI 兼容端点）走外部服务。BGE 模型首次运行需联网下载（HF 缓存后离线可用）。
+sentence-transformers>=5.0.0
+scikit-learn>=1.4.0
+
 # MySQL 生产路径（可选：Docker 环境启用真实链路时安装）
 # asyncmy>=0.2.9
 # pymysql>=1.1.0  # 种子脚本 scripts/seed_mysql.py 使用

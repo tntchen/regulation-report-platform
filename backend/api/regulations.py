@@ -219,7 +219,7 @@ async def get_document_detail(tenant_id: str, doc_id: str, tenant: dict = Depend
             preview = f.read(1000)
 
     vs = VectorService(tenant_id)
-    chunks = [c for c in vs.load_chunks() if c["doc_id"] == doc_id]
+    chunks = [c for c in await vs.load_chunks() if c["doc_id"] == doc_id]
 
     return {
         **doc,
@@ -378,7 +378,7 @@ async def index_status(tenant_id: str, tenant: dict = Depends(get_tenant)):
     return {
         "total_docs": len(docs),
         "by_status": by_status,
-        "total_chunks": vs.stats()["chunk_count"],
+        "total_chunks": (await vs.stats())["chunk_count"],
         "healthy": by_status.get("failed", 0) == 0
     }
 
@@ -396,7 +396,7 @@ async def retrieval_test(tenant_id: str, query: str, top_k: int = 5,
     # 无任何登记文档时（纯演示环境），不过滤
     if not active_ids:
         active_ids = None
-    result = vs.retrieve(query, doc_type=doc_type, top_k=top_k, active_doc_ids=active_ids)
+    result = await vs.retrieve(query, doc_type=doc_type, top_k=top_k, active_doc_ids=active_ids)
 
     return {
         "query": query,
@@ -438,7 +438,7 @@ async def get_stats(tenant_id: str, tenant: dict = Depends(get_tenant)):
         docs = result.scalars().all()
 
     vs = VectorService(tenant_id)
-    vstats = vs.stats()
+    vstats = await vs.stats()
 
     by_status = {}
     for d in docs:

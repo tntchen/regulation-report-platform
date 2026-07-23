@@ -26,7 +26,7 @@ class RegulationRAGService:
         if self._preset_checked:
             return
         self._preset_checked = True
-        if self.vector_service.load_chunks():
+        if await self.vector_service.load_chunks():
             return  # 已有索引，无需兜底
         for doc_id, doc in self._preset_documents().items():
             self.documents[doc_id] = doc
@@ -139,9 +139,36 @@ class RegulationRAGService:
 
     async def retrieve(self, query: str, doc_type: str = None, top_k: int = 5,
                        active_doc_ids: set = None) -> Dict[str, Any]:
-        """检索制度文档（切片级，含耗时）"""
+        """检索制度文档（切片级，含耗时）
+        一致性修复（L2-D8）：active_doc_ids 未显式传入时，默认只检索启用中的文档，
+        被禁用/删除的文档不再参与 Agent 1 检索。"""
         await self._ensure_preset()
-        return self.vector_service.retrieve(query, doc_type, top_k, active_doc_ids)
+        if active_doc_ids is None:
+            active_doc_ids = await self._default_active_doc_ids()
+        return await self.vector_service.retrieve(query, doc_type, top_k, active_doc_ids)
+
+    async def _default_active_doc_ids(self) -> set:
+        """从元数据表读取启用中的文档 ID 集合；
+        无登记文档时（纯预置/冒烟环境）返回 None 表示不过滤"""
+        from sqlalchemy import select
+        from backend.database import PlatformSessionLocal
+        from backend.models.document import RegulationDocument
+
+        async with PlatformSessionLocal() as session:
+            result = await session.execute(
+                select(RegulationDocument.id).where(
+                    RegulationDocument.tenant_id == self.tenant_id,
+                    RegulationDocument.is_active == True,  # noqa: E712
+                    RegulationDocument.status == "indexed",
+                )
+            )
+            active = {row[0] for row in result.all()}
+            # 该租户有登记文档时才过滤（避免预置文档在元数据缺失时被误过滤）
+            count = await session.execute(
+                select(RegulationDocument.id).where(
+                    RegulationDocument.tenant_id == self.tenant_id)
+            )
+            return active if count.first() else None
 
     async def add_document(self, doc_id: str, content: str, doc_type: str, title: str):
         """添加新文档并建立索引"""
