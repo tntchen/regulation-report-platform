@@ -100,16 +100,19 @@ class TaskOrchestrator:
         state = {
             "task_id": task_context.get("task_id", ""),
             "tenant_id": self.tenant_id,
+            "task_type": task_context.get("report_type", "report"),
+            "name": f"{task_context.get('report_type', '')} {task_context.get('report_code', '')} 报送任务".strip(),
             "status": "executing",
             "current_stage": "regulation_parser",
             "progress": 0,
             "stages": [],
             "outputs": {},
+            "report_config": task_context,
             "retry_count": 0,
             "start_time": start_time
         }
         # 登记初始状态（供 API 查询）
-        task_service.save_task_state(state)
+        await task_service.save_task_state(state)
 
         # 按DAG执行
         current_agents = ["regulation_parser"]
@@ -135,7 +138,7 @@ class TaskOrchestrator:
                     state["status"] = "failed"
                     state["error"] = f"Agent {agent_name} 执行失败: {result.error}"
                     state["duration_ms"] = int((time.time() - start_time) * 1000)
-                    task_service.save_task_state(state)
+                    await task_service.save_task_state(state)
                     return state
 
                 # 更新进度
@@ -153,7 +156,7 @@ class TaskOrchestrator:
                 if agent_name == "quality_gate":
                     gate_result = result.output.get("gate_result", "pass")
                     if gate_result == "block":
-                        rollback = self._handle_gate_block(
+                        rollback = await self._handle_gate_block(
                             state, task_context,
                             result.output.get("auto_fix_suggestions", []),
                             start_time
@@ -165,7 +168,7 @@ class TaskOrchestrator:
                 # 门禁②：测试验证关键项 fail → 回退 codegen
                 elif agent_name == "test_verify":
                     if result.output.get("critical_fail"):
-                        rollback = self._handle_gate_block(
+                        rollback = await self._handle_gate_block(
                             state, task_context,
                             result.output.get("fail_reasons", []),
                             start_time
@@ -177,7 +180,7 @@ class TaskOrchestrator:
                 completed_outputs[agent_name] = result.output
 
             # 每完成一层，刷新任务状态
-            task_service.save_task_state(state)
+            await task_service.save_task_state(state)
 
             # 门禁阻断：回退到 codegen 重新生成
             if rollback_to_codegen:
@@ -199,11 +202,11 @@ class TaskOrchestrator:
 
         state["status"] = "completed"
         state["duration_ms"] = int((time.time() - start_time) * 1000)
-        task_service.save_task_state(state)
+        await task_service.save_task_state(state)
 
         return state
 
-    def _handle_gate_block(self, state: dict, task_context: dict,
+    async def _handle_gate_block(self, state: dict, task_context: dict,
                            suggestions: list, start_time: float) -> str:
         """处理门禁阻断：更新重试计数，超限则标记任务失败
         返回 "retry" 表示回退重试，"failed" 表示超限失败"""
@@ -212,7 +215,7 @@ class TaskOrchestrator:
             state["status"] = "failed"
             state["error"] = f"质量门禁多次阻断，超过最大重试次数({self.MAX_GATE_RETRY})"
             state["duration_ms"] = int((time.time() - start_time) * 1000)
-            task_service.save_task_state(state)
+            await task_service.save_task_state(state)
             return "failed"
         # 修正建议注入 task_context，供 codegen 重试时参考
         task_context["fix_suggestions"] = suggestions

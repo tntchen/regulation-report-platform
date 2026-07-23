@@ -205,10 +205,14 @@ async def main():
     await scenario_c(result_a)
 
     # 任务状态登记验证（供 API 查询）
-    state = task_service.get_task_state("TASK_M2_SMOKE_001")
+    state = await task_service.get_task_state("TASK_M2_SMOKE_001")
     assert state and state["status"] == "completed"
     print(f"\n任务状态登记: TASK_M2_SMOKE_001 → {state['status']}, "
           f"阶段数 {len(state['stages'])}")
+
+    # 清理冒烟测试注入的制度文档（M3 起向量索引为持久化，避免污染统计）
+    from backend.services.vector_service import VectorService
+    await VectorService("T001").remove_document("m2_east_housing")
 
     print("\n" + "=" * 64)
     print("✅ M2 冒烟测试全部通过")

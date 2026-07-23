@@ -49,7 +49,7 @@ async def get_task(tenant_id: str, task_id: str):
     from backend.services import task_service
     from fastapi import HTTPException
 
-    state = task_service.get_task_state(task_id)
+    state = await task_service.get_task_state(task_id)
     if not state or state.get("tenant_id") != tenant_id:
         raise HTTPException(status_code=404, detail="任务不存在")
 

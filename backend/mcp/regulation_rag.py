@@ -1,28 +1,41 @@
 """
 MCP服务: regulation_rag
 职责: 制度文档向量检索
-Demo版使用内存FAISS，非Milvus
+M3 起改为持久化实现：底层委托 services/vector_service（租户隔离的磁盘索引），
+接口保持与 M1/M2 兼容（Agent 1 调用方式不变）。
+首次使用且索引为空时自动注入预置制度文档（兜底，保证离线演示可用）。
 """
 
-import os
-import numpy as np
 from typing import Dict, Any, List
+from backend.services.vector_service import VectorService
 
 
 class RegulationRAGService:
-    """制度检索RAG服务"""
+    """制度检索RAG服务（持久化版）"""
 
     def __init__(self, tenant_id: str = "T001"):
         self.tenant_id = tenant_id
-        self.documents = {}  # doc_id -> {content, metadata}
-        self.vectors = {}    # doc_id -> vector
+        self.vector_service = VectorService(tenant_id)
+        self._preset_checked = False
 
-        # 加载预置制度文档
-        self._load_preset_documents()
+        # documents 属性保留（兼容旧 API 与 Demo 代码读取文档清单）
+        self.documents: Dict[str, Dict[str, Any]] = {}
 
-    def _load_preset_documents(self):
-        """加载预置制度文档"""
-        preset_docs = {
+    async def _ensure_preset(self):
+        """索引为空时注入预置制度文档（离线兜底）"""
+        if self._preset_checked:
+            return
+        self._preset_checked = True
+        if self.vector_service.load_chunks():
+            return  # 已有索引，无需兜底
+        for doc_id, doc in self._preset_documents().items():
+            self.documents[doc_id] = doc
+            await self.vector_service.index_document(doc_id, doc["content"], doc["doc_type"], doc["title"])
+
+    @staticmethod
+    def _preset_documents() -> Dict[str, Dict[str, Any]]:
+        """预置制度文档（M1 遗留的内嵌演示集）"""
+        return {
             "1104_g01_housing": {
                 "content": """# 1104 G01 个人贷款口径
 ## 个人住房贷款
@@ -124,75 +137,29 @@ class RegulationRAGService:
             }
         }
 
-        for doc_id, doc in preset_docs.items():
-            self.documents[doc_id] = doc
-            # 模拟向量（实际应调用embedding模型）
-            self.vectors[doc_id] = np.random.randn(768).astype(np.float32)
-
-    async def retrieve(self, query: str, doc_type: str = None, top_k: int = 5) -> Dict[str, Any]:
-        """检索制度文档"""
-        results = []
-
-        for doc_id, doc in self.documents.items():
-            # 按类型过滤
-            if doc_type and doc["doc_type"] != doc_type:
-                continue
-
-            # 简单文本匹配（实际应做向量相似度计算）
-            content = doc["content"]
-            score = self._calculate_relevance(query, content)
-
-            if score > 0.3:  # 阈值
-                results.append({
-                    "doc_type": doc["doc_type"],
-                    "doc_title": doc["title"],
-                    "content": content[:300] + "..." if len(content) > 300 else content,
-                    "relevance_score": round(score, 2),
-                    "source_file": f"{doc['title']}.txt"
-                })
-
-        # 按相关度排序
-        results.sort(key=lambda x: x["relevance_score"], reverse=True)
-
-        return {
-            "results": results[:top_k],
-            "total_found": len(results)
-        }
-
-    def _calculate_relevance(self, query: str, content: str) -> float:
-        """计算查询与文档的相关度（简化版）
-        Jaccard 相似度 + 中文子串命中加成（中文无空格分词，整行被视为一个词，
-        纯 Jaccard 几乎无法命中，故对长度>=2的查询词做子串匹配补充）"""
-        query_words = set(query.lower().split())
-        content_words = set(content.lower().split())
-
-        if not query_words:
-            return 0.0
-
-        # Jaccard相似度
-        intersection = query_words & content_words
-        union = query_words | content_words
-
-        jaccard = len(intersection) / len(union) if union else 0.0
-
-        # 中文子串命中加成：查询词直接出现在文档内容中
-        content_lower = content.lower()
-        hits = sum(1 for w in query_words if len(w) >= 2 and w in content_lower)
-        substring_score = hits / len(query_words)
-
-        return max(jaccard, substring_score)
+    async def retrieve(self, query: str, doc_type: str = None, top_k: int = 5,
+                       active_doc_ids: set = None) -> Dict[str, Any]:
+        """检索制度文档（切片级，含耗时）"""
+        await self._ensure_preset()
+        return self.vector_service.retrieve(query, doc_type, top_k, active_doc_ids)
 
     async def add_document(self, doc_id: str, content: str, doc_type: str, title: str):
-        """添加新文档（向量库维护用）"""
+        """添加新文档并建立索引"""
         self.documents[doc_id] = {
             "content": content,
             "doc_type": doc_type,
             "title": title
         }
-        self.vectors[doc_id] = np.random.randn(768).astype(np.float32)
-        return {"status": "indexed", "doc_id": doc_id}
+        result = await self.vector_service.index_document(doc_id, content, doc_type, title)
+        return {"status": "indexed", "doc_id": doc_id, "chunk_count": result["chunk_count"]}
 
-    async def rebuild_index(self):
-        """重建索引"""
-        # 实际应重新计算所有向量
-        return {"rebuilt_docs": len(self.documents), "status": "success"}
+    async def rebuild_index(self, documents: List[Dict[str, Any]] = None):
+        """重建索引；不传 documents 时重建内存登记的全部文档"""
+        docs = documents
+        if docs is None:
+            docs = [
+                {"doc_id": d_id, "content": d["content"], "doc_type": d["doc_type"], "title": d["title"]}
+                for d_id, d in self.documents.items()
+            ]
+        result = await self.vector_service.rebuild_all(docs)
+        return {"rebuilt_docs": result["rebuilt_docs"], "status": "success"}

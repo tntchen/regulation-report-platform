@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     vector_store_type: str = "faiss"
     vector_dimension: int = 768
     embedding_model: str = "text2vec-large-chinese"
+    # Embedding 提供方: hash=本地伪向量(离线Demo) / remote=真实AI后端(替换点)
+    embedding_provider: str = "hash"
 
     # 安全配置
     secret_key: str = "dev-secret-key"

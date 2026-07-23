@@ -111,6 +111,9 @@ async def main():
     assert gate.get("gate_result") in ("pass", "warn"), f"质量门禁意外阻断: {gate.get('summary')}"
     assert result["status"] == "completed", f"任务未完成: {result.get('error')}"
 
+    # 清理冒烟测试注入的制度文档（M3 起向量索引为持久化，避免污染统计）
+    await rag.vector_service.remove_document("smoke_east_housing")
+
     print("\n✅ 冒烟测试通过: 3Agent 串行流程正常，质量门禁判定 =", gate.get("gate_result"))
     return 0
 

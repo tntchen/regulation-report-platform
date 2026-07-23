@@ -7,10 +7,12 @@ Python 3.10 + FastAPI + SQLite（平台库）+ MySQL（租户业务库，MCP 只
 
 - **M1**：标准包结构重组 + Agent 1/2/3（制度解析 → 代码生成 → 质量校验）串行流程跑通，
   质量门禁支持 blocker 阻断回退重试、warning 放行记录。
-- **M2（当前）**：Agent 4/5/6（测试验证 / 数字孪生 / 投产交付）真实实现，6Agent 完整链路打通：
+- **M2**：Agent 4/5/6（测试验证 / 数字孪生 / 投产交付）真实实现，6Agent 完整链路打通：
   Agent 4 与 Agent 5 并行执行；Agent 4 关键项失败同样回退 Agent 2；
-  Agent 6 汇总全链路产出生成 Markdown 交付物至 `data/tasks/{task_id}/`；
-  任务状态实时登记，GET API 可查阶段明细。
+  Agent 6 汇总全链路产出生成 Markdown 交付物至 `data/tasks/{task_id}/`。
+- **M3（当前）**：数据与向量库管线落地——任务状态 SQLite 持久化（重启可查）；
+  38 份真实制度文档批量导入向量库；"上传→解析→切片→索引→检索测试"闭环；
+  向量库维护 API 全量补齐（文档管理/索引重建/检索测试/统计/日志）。
 
 ## 目录结构
 
@@ -57,16 +59,22 @@ regulation-report-platform/
 │   │   ├── tenant.py / task.py / document.py / regulation.py
 │   │
 │   ├── services/                  # 业务服务层
-│   │   └── task_service.py        # 任务状态登记与查询（内存版，供 API 实时查询）
+│   │   ├── task_service.py        # 任务状态持久化（SQLite，重启可查）
+│   │   ├── vector_service.py      # 租户级向量索引（语义切片 + hash 向量 + 中文检索）
+│   │   └── document_service.py    # 上传文档解析（TXT/MD 直读，PDF/DOCX 视环境）
 │   └── utils/
 │       └── exceptions.py          # 平台自定义异常
 │
 ├── scripts/
 │   ├── smoke_test.py              # M1 冒烟测试：3Agent 串行验证
-│   └── smoke_test_m2.py           # M2 冒烟测试：6Agent 全链路 + 门禁回退 + 数字孪生
+│   ├── smoke_test_m2.py           # M2 冒烟测试：6Agent 全链路 + 门禁回退 + 数字孪生
+│   ├── smoke_test_m3.py           # M3 冒烟测试：向量库管线 + 持久化验证
+│   └── seed_regulations.py        # 38 份真实制度文档批量导入
 │
 └── data/                          # 运行时数据
+    ├── platform.db                # 平台配置库（任务/文档元数据/索引日志）
     ├── demo_biz.db                # SQLite 演示数据集（首次运行自动播种）
+    ├── tenants/{tenant_id}/       # 租户数据（regulations/ 文档 + vectors/ 索引）
     └── tasks/{task_id}/           # Agent 6 生成的投产交付物
 ```
 
@@ -97,6 +105,10 @@ python scripts/smoke_test.py
 
 # M2: 6Agent 全链路 + 门禁回退 + 数字孪生差异
 python scripts/smoke_test_m2.py
+
+# M3: 向量库管线（需先执行种子导入）
+python scripts/seed_regulations.py   # 导入 38 份真实制度文档
+python scripts/smoke_test_m3.py
 ```
 
 M2 冒烟测试覆盖三个场景：
@@ -174,6 +186,40 @@ curl -X POST http://127.0.0.1:8080/v1/tenants/T001/tasks \
 - `02_口径映射表.md` —— 制度依据 + 陷阱清单 + 字段映射
 - `03_校验结论摘要.md` —— 六维门禁结果 + 七项测试结果
 - `04_投产Checklist.md` —— 自动校验项 + 人工确认项 + 孪生差异结论
+
+## 向量库管线（M3）
+
+**数据流**：上传 → 解析（TXT/MD 直读；PDF/DOCX 视环境，缺库时明确报"暂不支持"）
+→ 语义切片（按标题/段落，chunk_size≈512，overlap≈50）→ 向量化索引。
+
+**存储**：文档元数据落 SQLite（regulation_documents 表）；向量索引落租户独立目录
+`data/tenants/{tenant_id}/vectors/chunks.json`（租户物理隔离）。
+Embedding 为可替换点：默认 `embedding_provider=hash`（离线确定性伪向量），
+接入真实 embedding 服务时替换 `VectorService.embed()` 即可。
+
+**检索打分**：中文 bigram 子串命中 + 英文/数字词命中 + 标题加成，
+支持 `active_doc_ids` 过滤实现禁用文档不召回。
+
+**预置制度导入**：
+
+```bash
+python scripts/seed_regulations.py
+# 38 份真实制度 txt → 复制到租户目录 + 元数据落库 + 索引，打印逐文档切片数
+```
+
+**向量库维护 API**：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/v1/tenants/{tid}/regulations/documents` | 上传文档（自动索引） |
+| GET | `.../regulations/documents` / `.../documents/{doc_id}` | 列表 / 详情（含切片） |
+| PUT | `.../regulations/documents/{doc_id}` | 启用/禁用 |
+| DELETE | `.../regulations/documents/{doc_id}` | 删除（索引+文件+元数据） |
+| POST | `.../regulations/reindex` / `.../documents/{doc_id}/reindex` | 全量/单文档重建 |
+| GET | `.../regulations/index-status` | 索引状态概览 |
+| POST | `.../regulations/retrieval-test` | 检索测试（Top-K 排名/相关度/片段/耗时） |
+| POST | `.../regulations/retrieval-feedback` | 检索反馈 |
+| GET | `.../regulations/stats` / `.../index-logs` | 统计 / 索引日志 |
 
 ## 安全红线
 

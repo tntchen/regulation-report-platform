@@ -8,6 +8,14 @@ from sqlalchemy.orm import declarative_base
 from sqlalchemy.pool import NullPool
 from backend.config import settings
 
+import os
+
+# 确保 SQLite 平台库所在目录存在（数据库文件路径为相对路径时按当前工作目录解析）
+if settings.database_url.startswith("sqlite"):
+    db_file = settings.database_url.split("///")[-1]
+    if db_file and db_file != ":memory:":
+        os.makedirs(os.path.dirname(os.path.abspath(db_file)), exist_ok=True)
+
 # 平台配置库(SQLite)
 platform_engine = create_async_engine(
     settings.database_url,
