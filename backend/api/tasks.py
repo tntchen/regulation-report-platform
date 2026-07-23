@@ -47,7 +47,10 @@ async def create_task(tenant_id: str, task_data: dict, request: Request,
         "target_table": task_data.get("target_table", ""),
         "output_mode": task_data.get("output_mode", "sql"),
         "dialect": task_data.get("dialect", "mysql"),
-        "twin_compare_with": task_data.get("twin_compare_with", [])
+        "twin_compare_with": task_data.get("twin_compare_with", []),
+        # HITL 映射工作台：场景包（不显式指定时 Agent 侧缺省 G01 兼容存量行为）+ 自动模式
+        "report_pack_id": task_data.get("report_pack_id"),
+        "auto_mode": bool(task_data.get("auto_mode", False)),
     }
 
     # 落库 queued，立即返回（worker 后台拾取执行）
@@ -67,6 +70,8 @@ async def create_task(tenant_id: str, task_data: dict, request: Request,
             "report_type": task_context["report_type"],
             "report_code": task_context["report_code"],
             "target_table": task_context["target_table"],
+            "report_pack_id": task_context["report_pack_id"],
+            "auto_mode": task_context["auto_mode"],
             "client_request_id": client_request_id,
         },
         ip=request.client.host if request.client else None,

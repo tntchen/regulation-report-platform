@@ -1,10 +1,14 @@
 """
 Agent 1: 制度解析Agent (Regulation Parser)
 职责: 检索制度，提取口径，识别陷阱
+
+场景包驱动：任务关联 report_pack 时，检索关键词/报表类型/陷阱提示/映射建议
+均从包定义读取（替换硬编码）；包缺失时回退原有行为（缺省 G01，兼容存量任务）。
 """
 
 import time
 from backend.agents.base import BaseAgent, AgentResult
+from backend.services import report_pack_service
 
 
 class RegulationParserAgent(BaseAgent):
@@ -20,13 +24,29 @@ class RegulationParserAgent(BaseAgent):
         start_time = time.time()
 
         try:
+            # 0. 解析场景包（未指定时缺省 G01；包加载失败回退硬编码行为）
+            pack = await report_pack_service.get_pack_safe(
+                task_context.get("report_pack_id"))
+            if pack:
+                # 包定义回填任务上下文（任务显式指定的字段优先）
+                task_context.setdefault("report_pack_id", pack["id"])
+                if not task_context.get("report_type"):
+                    task_context["report_type"] = pack["report_type"]
+                if not task_context.get("target_table"):
+                    task_context["target_table"] = pack["target_table"]
+                if not task_context.get("source_tables"):
+                    task_context["source_tables"] = list(pack["source_tables"])
+
             # 1. 解析用户意图
             report_type = task_context.get("report_type", "")
             report_code = task_context.get("report_code", "")
             section = task_context.get("section", "")
 
-            # 2. 检索制度
-            query = f"{report_type} {report_code} {section} 口径"
+            # 2. 检索制度（场景包提供检索关键词时优先使用）
+            if pack and pack.get("regulation_keywords"):
+                query = f"{pack['regulation_keywords']} {section}".strip()
+            else:
+                query = f"{report_type} {report_code} {section} 口径"
             rag_results = await self._call_mcp(
                 "regulation_rag.retrieve",
                 query=query,
@@ -38,8 +58,12 @@ class RegulationParserAgent(BaseAgent):
             summary = self._extract_summary(rag_results)
             traps = self._identify_traps(rag_results)
 
-            # 4. 构建字段映射建议
-            mapping_suggestions = self._suggest_mappings(rag_results)
+            # 场景包陷阱关键词：检索未命中时按包定义补充提示级陷阱
+            if pack:
+                traps = self._merge_pack_traps(traps, pack.get("trap_refs", []))
+
+            # 4. 构建字段映射建议（场景包目标结构驱动）
+            mapping_suggestions = self._suggest_mappings(rag_results, pack)
 
             duration_ms = int((time.time() - start_time) * 1000)
 
@@ -51,7 +75,9 @@ class RegulationParserAgent(BaseAgent):
                     "traps_identified": traps,
                     "mapping_suggestions": mapping_suggestions,
                     "source_files": [r.get("source_file", "") for r in rag_results.get("results", [])],
-                    "retrieved_count": rag_results.get("total_found", 0)
+                    "retrieved_count": rag_results.get("total_found", 0),
+                    "report_pack_id": pack["id"] if pack else None,
+                    "retrieval_query": query
                 },
                 duration_ms=duration_ms
             )
@@ -103,9 +129,31 @@ class RegulationParserAgent(BaseAgent):
 
         return traps
 
-    def _suggest_mappings(self, rag_results: dict) -> list:
-        """建议字段映射"""
-        # 基于检索结果，建议源表字段到目标字段的映射
-        suggestions = []
-        # 简化版：返回空列表，由代码生成Agent根据Schema决定
-        return suggestions
+    def _merge_pack_traps(self, traps: list, trap_refs: list) -> list:
+        """合并场景包陷阱关键词：已在检索结果中出现的去重，未命中的补提示级"""
+        merged = list(traps)
+        existing_text = "".join(t.get("description", "") for t in traps)
+        for keyword in trap_refs:
+            if keyword and keyword not in existing_text:
+                merged.append({
+                    "level": "hint",
+                    "description": f"【场景包陷阱提示】注意「{keyword}」相关口径处理"
+                })
+        return merged
+
+    def _suggest_mappings(self, rag_results: dict, pack: dict = None) -> list:
+        """建议字段映射
+        场景包驱动：按包目标结构给出每个目标字段的口径文本与候选源表，
+        供映射推断引擎（方案B）做五通道打分；无包时保持原有空列表行为。"""
+        if not pack:
+            return []
+        return [
+            {
+                "target_field": f.get("field", ""),
+                "caliber_text": f.get("caliber_text", ""),
+                "data_type": f.get("data_type", ""),
+                "required": f.get("required", False),
+                "candidate_source_tables": list(pack.get("source_tables", [])),
+            }
+            for f in pack.get("target_schema", [])
+        ]

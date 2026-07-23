@@ -9,6 +9,15 @@ from backend.models.document import RegulationDocument
 from backend.models.regulation import IndexLog, RetrievalFeedback
 from backend.models.user import User, UserTenantBinding
 from backend.models.audit_log import AuditLog
+from backend.models.report_pack import ReportPack
 
 __all__ = ["Tenant", "Task", "RegulationDocument", "IndexLog", "RetrievalFeedback",
-           "User", "UserTenantBinding", "AuditLog"]
+           "User", "UserTenantBinding", "AuditLog", "ReportPack"]
+
+# 映射工作台相关模型（范围 B 产出）：文件就绪后纳入 metadata 收集，未就绪时静默跳过
+try:
+    from backend.models.field_mapping import FieldMapping
+    from backend.models.mapping_asset import MappingAsset
+    __all__ += ["FieldMapping", "MappingAsset"]
+except ImportError:
+    pass

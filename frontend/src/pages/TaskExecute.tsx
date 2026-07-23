@@ -4,14 +4,15 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { api, TaskDetail, StageRecord } from '../api/client'
 import { useTenant } from '../App'
 
-// 6 Agent 元信息（与后端编排器 DAG 对齐）
+// 6 Agent 元信息（与后端编排器 DAG 对齐）+ 映射确认人工节点（human-in-the-loop）
 const AGENTS = [
-  { key: 'regulation_parser', name: 'Agent 1 制度解析', parallel: false },
-  { key: 'codegen', name: 'Agent 2 代码生成', parallel: false },
-  { key: 'quality_gate', name: 'Agent 3 质量校验', parallel: false },
-  { key: 'test_verify', name: 'Agent 4 测试验证', parallel: true },
-  { key: 'digital_twin', name: 'Agent 5 数字孪生', parallel: true },
-  { key: 'deploy', name: 'Agent 6 投产交付', parallel: false },
+  { key: 'regulation_parser', name: 'Agent 1 制度解析', parallel: false, manual: false },
+  { key: 'mapping_confirmation', name: '映射确认', parallel: false, manual: true },
+  { key: 'codegen', name: 'Agent 2 代码生成', parallel: false, manual: false },
+  { key: 'quality_gate', name: 'Agent 3 质量校验', parallel: false, manual: false },
+  { key: 'test_verify', name: 'Agent 4 测试验证', parallel: true, manual: false },
+  { key: 'digital_twin', name: 'Agent 5 数字孪生', parallel: true, manual: false },
+  { key: 'deploy', name: 'Agent 6 投产交付', parallel: false, manual: false },
 ]
 
 /** 单 Agent 阶段摘要（从产出中提取一句话说明） */
@@ -84,6 +85,7 @@ const TaskExecute: React.FC = () => {
   const completedKeys = new Set(task.stages.map((s) => s.agent_name))
   const nextKeys = (() => {
     // 依据 DAG 推导当前应执行的层
+    if (task.status === 'waiting_confirmation') return new Set(['mapping_confirmation'])
     if (task.status !== 'executing') return new Set<string>()
     if (!completedKeys.has('regulation_parser')) return new Set(['regulation_parser'])
     if (!completedKeys.has('codegen')) return new Set(['codegen'])
@@ -102,9 +104,13 @@ const TaskExecute: React.FC = () => {
         title={`任务执行 ${task.task_id}`}
         extra={
           <Space>
-            <Tag color={task.status === 'completed' ? 'success' : task.status === 'failed' ? 'error' : task.status === 'cancelled' ? 'default' : task.status === 'queued' ? 'gold' : 'processing'}>
-              {task.status === 'completed' ? '已完成' : task.status === 'failed' ? '失败' : task.status === 'cancelled' ? '已取消' : task.status === 'queued' ? '排队中' : '执行中'}
+            <Tag color={task.status === 'completed' ? 'success' : task.status === 'failed' ? 'error' : task.status === 'cancelled' ? 'default' : task.status === 'queued' ? 'gold' : task.status === 'waiting_confirmation' ? 'gold' : 'processing'}>
+              {task.status === 'completed' ? '已完成' : task.status === 'failed' ? '失败' : task.status === 'cancelled' ? '已取消' : task.status === 'queued' ? '排队中' : task.status === 'waiting_confirmation' ? '待确认映射' : '执行中'}
             </Tag>
+            {task.status === 'waiting_confirmation' && (
+              <Button type="primary" style={{ background: '#d48806', borderColor: '#d48806' }}
+                onClick={() => navigate(`/mapping/${task.task_id}`)}>前往映射工作台</Button>
+            )}
             {(task.status === 'queued' || task.status === 'executing') && (
               <Popconfirm title="确认取消该任务？" onConfirm={cancel}>
                 <Button danger>取消任务</Button>
@@ -144,10 +150,59 @@ const Row_AgentCards: React.FC<{
   lastStageOf: (k: string) => StageRecord | undefined
   runCountOf: (k: string) => number
   nextKeys: Set<string>
-}> = ({ lastStageOf, runCountOf, nextKeys }) => {
+}> = ({ task, lastStageOf, runCountOf, nextKeys }) => {
+  const navigate = useNavigate()
+  // 映射确认（人工节点）无 Agent 执行记录：按任务状态与下游阶段推导其状态
+  const manualDone = lastStageOf('codegen') !== undefined
   return (
     <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
       {AGENTS.map((a) => {
+        // —— 人工节点（映射确认）：样式与自动 Agent 区分 ——
+        if (a.manual) {
+          const waiting = task.status === 'waiting_confirmation'
+          const done = manualDone || task.status === 'completed'
+          return (
+            <Card
+              key={a.key}
+              size="small"
+              style={{
+                width: 250,
+                borderStyle: 'dashed',
+                borderColor: waiting ? '#d48806' : done ? '#b7eb8f' : '#d9d9d9',
+                background: waiting ? '#fffbe6' : undefined,
+                boxShadow: waiting ? '0 0 8px #d4880655' : undefined,
+              }}
+              title={
+                <Space>
+                  {a.name}
+                  <Tag color="purple">人工</Tag>
+                </Space>
+              }
+              extra={
+                waiting ? <Tag color="gold">待确认</Tag>
+                  : done ? <Tag color="success">已完成</Tag>
+                  : <Tag>等待</Tag>
+              }
+            >
+              <div style={{ minHeight: 60, fontSize: 13 }}>
+                {waiting ? (
+                  <>
+                    <div style={{ marginBottom: 8 }}>AI 映射推断完成，等待专家确认/修改字段映射</div>
+                    <Button size="small" type="primary"
+                      style={{ background: '#d48806', borderColor: '#d48806' }}
+                      onClick={() => navigate(`/mapping/${task.task_id}`)}>
+                      前往映射工作台
+                    </Button>
+                  </>
+                ) : done ? (
+                  <span style={{ color: '#666' }}>映射已确认，结果沉淀为历史映射资产</span>
+                ) : (
+                  <span style={{ color: '#999' }}>等待映射推断完成</span>
+                )}
+              </div>
+            </Card>
+          )
+        }
         const stage = lastStageOf(a.key)
         const running = nextKeys.has(a.key)
         const retries = runCountOf(a.key)

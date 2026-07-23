@@ -1,35 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Table, Button, Tag, Modal, Form, Select, Input, message, Space, Card, Progress, Popconfirm } from 'antd'
-import { PlusOutlined, RocketOutlined } from '@ant-design/icons'
+import { PlusOutlined, NodeIndexOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
-import { api, TaskBrief } from '../api/client'
+import { api, TaskBrief, ReportPack } from '../api/client'
 import { useTenant } from '../App'
-
-// 预置报表类型模板（与后端 Mock 演示数据对齐）
-const REPORT_TEMPLATES = [
-  {
-    label: 'EAST 个人信贷借据（住房贷款）',
-    value: 'EAST_LOAN',
-    payload: {
-      report_type: 'EAST', report_code: 'EAST_LOAN_01', section: '个人住房贷款',
-      source_tables: ['loan_contract'], target_table: 'rpt_east_housing_loan',
-      output_mode: 'sql', dialect: 'mysql',
-    },
-  },
-  {
-    label: '1104 G01 个人住房贷款',
-    value: '1104_G01',
-    payload: {
-      report_type: '1104', report_code: 'G01', section: '个人住房贷款',
-      source_tables: ['loan_contract'], target_table: 'rpt_g01_housing_loan',
-      output_mode: 'sql', dialect: 'mysql',
-    },
-  },
-]
 
 const STATUS_TAG: Record<string, { color: string; text: string }> = {
   queued: { color: 'gold', text: '排队中' },
   executing: { color: 'processing', text: '执行中' },
+  waiting_confirmation: { color: 'gold', text: '待确认映射' },
   completed: { color: 'success', text: '已完成' },
   failed: { color: 'error', text: '失败' },
   cancelled: { color: 'default', text: '已取消' },
@@ -43,6 +22,7 @@ const TaskHall: React.FC = () => {
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const [creating, setCreating] = useState(false)
+  const [packs, setPacks] = useState<ReportPack[]>([])
   const [form] = Form.useForm()
   const navigate = useNavigate()
   // 幂等键：每次打开"新建任务"弹窗生成一次，弹窗内重复点击/重试都返回同一任务
@@ -50,6 +30,10 @@ const TaskHall: React.FC = () => {
   const openCreateModal = () => {
     clientRequestId.current = `web-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     setModalOpen(true)
+    // 场景包下拉从后端加载（替换原硬编码模板），缺省 G01
+    api.listReportPacks(tenantId)
+      .then((r) => setPacks(r.packs.filter((p) => p.status !== 'disabled')))
+      .catch((e) => message.warning(`场景包加载失败: ${e.message}`))
   }
 
   const load = async () => {
@@ -70,8 +54,11 @@ const TaskHall: React.FC = () => {
   const createTask = async (values: any) => {
     setCreating(true)
     try {
-      const tpl = REPORT_TEMPLATES.find((t) => t.value === values.template)!
-      const payload = { ...tpl.payload, client_request_id: clientRequestId.current }
+      // 场景包驱动：后端按 report_pack_id 读取目标结构/源表/勾稽规则（缺省 G01 保持兼容）
+      const payload: Record<string, any> = {
+        report_pack_id: values.report_pack_id || 'G01',
+        client_request_id: clientRequestId.current,
+      }
       if (values.target_table) payload.target_table = values.target_table
       const r = await api.createTask(tenantId, payload)
       message.success('任务已排队，后台执行中')
@@ -118,6 +105,13 @@ const TaskHall: React.FC = () => {
       render: (_: any, r: TaskBrief) => (
         <Space>
           <Button size="small" type="link" onClick={() => navigate(`/execute/${r.task_id}`)}>执行</Button>
+          {r.status === 'waiting_confirmation' && (
+            <Button size="small" type="link" icon={<NodeIndexOutlined />}
+              style={{ color: '#d48806' }}
+              onClick={() => navigate(`/mapping/${r.task_id}`)}>
+              确认映射
+            </Button>
+          )}
           <Button size="small" type="link" onClick={() => navigate(`/quality/${r.task_id}`)}>校验报告</Button>
           <Button size="small" type="link" onClick={() => navigate(`/twin/${r.task_id}`)}>孪生对比</Button>
           {(r.status === 'queued' || r.status === 'executing') && (
@@ -160,15 +154,23 @@ const TaskHall: React.FC = () => {
         okText="创建并执行"
       >
         <Form form={form} layout="vertical" onFinish={createTask}
-          initialValues={{ template: 'EAST_LOAN' }}>
-          <Form.Item name="template" label="报表类型" rules={[{ required: true }]}>
-            <Select options={REPORT_TEMPLATES.map((t) => ({ value: t.value, label: t.label }))} />
+          initialValues={{ report_pack_id: 'G01' }}>
+          <Form.Item name="report_pack_id" label="场景包" rules={[{ required: true }]}
+            extra="报表定义数据化：目标结构/候选源表/勾稽规则由场景包驱动">
+            <Select
+              loading={packs.length === 0}
+              options={packs.map((p) => ({
+                value: p.id,
+                label: `${p.id} ${p.report_name}（${p.report_type}）`,
+                disabled: p.status === 'draft',
+              }))}
+            />
           </Form.Item>
-          <Form.Item name="target_table" label="目标表（可选，默认随模板）">
-            <Input placeholder="如 rpt_east_housing_loan" />
+          <Form.Item name="target_table" label="目标表（可选，默认随场景包）">
+            <Input placeholder="如 rpt_g01_housing_loan" />
           </Form.Item>
           <Form.Item label="数据源">
-            <Input value="零售信贷主库 loan_contract（演示数据集）" disabled />
+            <Input value="由场景包 source_tables 决定（演示数据集）" disabled />
           </Form.Item>
         </Form>
       </Modal>

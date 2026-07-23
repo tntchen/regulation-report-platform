@@ -78,6 +78,105 @@ export interface RetrievalItem {
   vector_score?: number; text_score?: number  // L2-D8 双通道得分
 }
 
+// ---------- 映射工作台 + 场景包（契约见 docs/映射工作台与场景包设计方案.md §一/§2.5） ----------
+
+/** 场景包目标字段定义 */
+export interface TargetSchemaField {
+  field: string
+  data_type: string
+  required: boolean
+  caliber_text: string           // 口径说明（制度语义通道的锚点）
+  expected_domain?: string[]     // 期望值域/枚举（画像通道匹配用）
+}
+
+/** 勾稽规则 */
+export interface ReconciliationRule {
+  name: string
+  expression: string
+  tolerance: number
+}
+
+/** 场景包 Report Pack */
+export interface ReportPack {
+  id: string
+  report_name: string
+  report_type: string            // 1104 / EAST / ...
+  target_table: string
+  target_schema: TargetSchemaField[]
+  source_tables: string[]
+  reconciliation_rules: ReconciliationRule[]
+  trap_refs: string[]
+  regulation_keywords: string
+  status: string                 // active / draft / disabled
+  created_by?: string
+  created_at?: string
+  updated_at?: string
+}
+
+/** 五通道证据得分（缺失通道为 null，不计入融合权重） */
+export interface MappingEvidence {
+  name?: number | null
+  comment?: number | null
+  profile?: number | null
+  semantic?: number | null
+  history?: number | null
+}
+
+/** 源字段数据画像（并入 mappings 响应，不单独开 API） */
+export interface ColumnProfile {
+  null_rate?: number
+  distinct_count?: number
+  sample_values?: any[]
+  min?: number | string | null
+  max?: number | string | null
+  format_pattern?: string | null // 证件号/手机号/日期/金额 等正则识别结果
+  enum_values?: any[] | null     // 低基数字段的枚举值
+}
+
+/** 候选源字段（AI 推断候选，含得分） */
+export interface CandidateField {
+  source_table: string
+  source_field: string
+  comment?: string
+  confidence: number
+  evidence?: MappingEvidence
+  profile?: ColumnProfile
+}
+
+/** 字段映射（状态机：ai_inferred/confirmed/modified/rejected/unmapped/needs_etl） */
+export interface FieldMapping {
+  id: string
+  task_id: string
+  report_pack_id: string
+  target_field: string
+  caliber_text?: string          // 目标字段口径说明（从场景包带入，便于工作台展示）
+  source_table?: string | null   // 未映射时为空
+  source_field?: string | null
+  transform_rule: string         // "DIRECT" 或 SQL 表达式
+  confidence: number             // 0-1
+  evidence: MappingEvidence
+  status: string
+  confirmed_by?: string | null
+  confirmed_at?: string | null
+  profile?: ColumnProfile | null       // 已选源字段画像
+  candidates?: CandidateField[]        // 候选源字段列表（工作台右列）
+  created_at?: string
+  updated_at?: string
+}
+
+/** 历史映射资产 */
+export interface MappingAsset {
+  id: string
+  report_pack_id: string
+  target_field: string
+  source_table: string
+  source_field: string
+  transform_rule: string
+  use_count: number
+  last_confirmed_by?: string
+  last_confirmed_at?: string
+}
+
 export interface AuditLogItem {
   id: number; timestamp: string; trace_id: string; username?: string
   tenant_id?: string; action: string; resource?: string
@@ -142,6 +241,53 @@ export const api = {
 
   indexLogs: (tid: string, limit = 10) =>
     request<{ total: number; logs: any[] }>(`/v1/tenants/${tid}/regulations/index-logs?limit=${limit}`),
+
+  // ---------- 场景包（契约 §2.5，admin 才可写，后端强制鉴权） ----------
+  listReportPacks: (tid: string) =>
+    request<{ total: number; packs: ReportPack[] }>(`/v1/tenants/${tid}/report-packs`),
+
+  getReportPack: (tid: string, packId: string) =>
+    request<ReportPack>(`/v1/tenants/${tid}/report-packs/${packId}`),
+
+  createReportPack: (tid: string, payload: Partial<ReportPack>) =>
+    request<ReportPack>(`/v1/tenants/${tid}/report-packs`, {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
+
+  updateReportPack: (tid: string, packId: string, payload: Partial<ReportPack>) =>
+    request<ReportPack>(`/v1/tenants/${tid}/report-packs/${packId}`, {
+      method: 'PUT', body: JSON.stringify(payload),
+    }),
+
+  // ---------- 映射（human-in-the-loop） ----------
+  listTaskMappings: (tid: string, taskId: string) =>
+    request<{ total: number; mappings: FieldMapping[] }>(
+      `/v1/tenants/${tid}/tasks/${taskId}/mappings`),
+
+  confirmMapping: (tid: string, taskId: string, mid: string, transformRule?: string) =>
+    request<FieldMapping>(`/v1/tenants/${tid}/tasks/${taskId}/mappings/${mid}/confirm`, {
+      method: 'POST', body: JSON.stringify(transformRule ? { transform_rule: transformRule } : {}),
+    }),
+
+  modifyMapping: (tid: string, taskId: string, mid: string,
+    payload: { source_table: string; source_field: string; transform_rule: string }) =>
+    request<FieldMapping>(`/v1/tenants/${tid}/tasks/${taskId}/mappings/${mid}/modify`, {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
+
+  rejectMapping: (tid: string, taskId: string, mid: string) =>
+    request<FieldMapping>(`/v1/tenants/${tid}/tasks/${taskId}/mappings/${mid}/reject`, { method: 'POST' }),
+
+  needsEtlMapping: (tid: string, taskId: string, mid: string) =>
+    request<FieldMapping>(`/v1/tenants/${tid}/tasks/${taskId}/mappings/${mid}/needs-etl`, { method: 'POST' }),
+
+  confirmAllMappings: (tid: string, taskId: string) =>
+    request<{ task_id: string; status: string; message: string }>(
+      `/v1/tenants/${tid}/tasks/${taskId}/mappings/confirm-all`, { method: 'POST' }),
+
+  listMappingAssets: (tid: string, reportPackId?: string) =>
+    request<{ total: number; assets: MappingAsset[] }>(
+      `/v1/tenants/${tid}/mapping-assets${reportPackId ? `?report_pack_id=${encodeURIComponent(reportPackId)}` : ''}`),
 
   // 审计日志
   auditLogs: (tid: string, params: { page?: number; page_size?: number; action?: string; username?: string }) => {

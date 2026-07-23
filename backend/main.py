@@ -118,6 +118,16 @@ async def global_exception_handler(request: Request, exc: Exception):
 # 挂载业务路由
 app.include_router(api_router)
 
+# 映射工作台 + 场景包路由（范围C统一注册）
+from backend.api import mappings as mappings_api  # noqa: E402
+app.include_router(mappings_api.router, prefix="/v1")
+try:
+    # A 的场景包路由（并行开发期间可能尚未就绪，兜底跳过不影响主应用）
+    from backend.api.report_packs import report_packs_router  # noqa: E402
+    app.include_router(report_packs_router, prefix="/v1")
+except Exception as _e:
+    logger.warning("report_packs 路由未就绪，跳过注册: %s", _e)
+
 
 # ============================================
 # 健康检查（深度版）
