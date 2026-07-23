@@ -122,6 +122,9 @@ regulation-report-platform/
 
 ## 快速开始
 
+> 一键方式：`bash scripts/setup_dev.sh`（建 venv + 装依赖 + 灌演示数据，加 `--serve` 直接起服务）。
+> 运行机制与参数详见 `docs/开发环境一键脚本说明.md`。以下为手工分步方式：
+
 ```bash
 pip install -r requirements.txt
 cp .env.example .env    # 可选；生产部署必须设置 SECRET_KEY
