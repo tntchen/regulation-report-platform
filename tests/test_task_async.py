@@ -247,6 +247,12 @@ def test_concurrency_limit(client):
         old = settings.task_worker_max_concurrency
         settings.task_worker_max_concurrency = 1
         try:
+            # 清理前序测试遗留的 executing/queued 僵尸任务（全量跑时共享库，会占住并发槽）
+            for stale in await task_service.list_tasks():
+                if stale["status"] in ("executing", "queued") and not stale["task_id"].startswith("TASK_CONC_"):
+                    stale["status"] = "failed"
+                    stale["error"] = "测试清理：僵尸任务"
+                    await task_service.save_task_state(stale)
             for i in range(2):
                 await task_service.create_queued_task(
                     f"TASK_CONC_{i}", "T001",
@@ -256,7 +262,12 @@ def test_concurrency_limit(client):
             worker = TaskWorker()
             await worker._schedule_once()
             # 上限 1：只应有 1 个进入 executing，另 1 个仍 queued
-            executing = await task_service.count_executing()
+            # 只统计本用例的 TASK_CONC_ 任务（全量跑时库中可能有其他测试遗留任务）
+            all_tasks = await task_service.list_tasks()
+            executing = sum(
+                1 for t in all_tasks
+                if t["task_id"].startswith("TASK_CONC_") and t["status"] == "executing"
+            )
             queued = [t for t in await task_service.fetch_queued_tasks(10)
                       if t["task_id"].startswith("TASK_CONC_")]
             assert executing == 1, f"executing={executing}，并发上限未生效"

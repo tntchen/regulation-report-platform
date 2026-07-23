@@ -232,6 +232,38 @@ export interface AuditLogItem {
   detail: Record<string, any>; ip?: string; result: string; duration_ms?: number
 }
 
+// ---------- 报送台账 + 接口文件导出（P2 契约，后端并行开发，不 mock 进组件） ----------
+
+/** 台账条目：GET /ledger?period=YYYY-MM */
+export interface LedgerEntry {
+  id: string
+  report_pack_id: string
+  report_name: string
+  period: string
+  deadline: string
+  status: 'pending' | 'in_progress' | 'submitted' | 'overdue'
+  task_id?: string
+  submitted_at?: string
+  days_left: number
+}
+
+/** 接口文件导出结果：POST /tasks/{task_id}/export-interface-file */
+export interface ExportFileResult {
+  file_name: string
+  format: string
+  row_count: number
+  preview: string          // 文件内容预览（前几行）
+}
+
+/** 已生成导出文件列表项：GET /tasks/{task_id}/exports */
+export interface ExportFileItem {
+  file_name: string
+  format: string
+  row_count?: number
+  created_at?: string
+  size?: number
+}
+
 // ---------- API 方法 ----------
 
 export const api = {
@@ -375,6 +407,60 @@ export const api = {
 
   auditActions: (tid: string) =>
     request<{ actions: string[] }>(`/v1/tenants/${tid}/audit-logs/actions`),
+
+  // ---------- P2 报送台账 ----------
+  // 按月查询台账（period=YYYY-MM）
+  listLedger: (tid: string, period: string) =>
+    request<{ entries: LedgerEntry[] }>(
+      `/v1/tenants/${tid}/ledger?period=${encodeURIComponent(period)}`),
+
+  // 生成指定月份台账
+  generateLedger: (tid: string, period: string) =>
+    request<{ entries: LedgerEntry[] }>(`/v1/tenants/${tid}/ledger/generate`, {
+      method: 'POST', body: JSON.stringify({ period }),
+    }),
+
+  // 标记台账条目已报送
+  submitLedgerEntry: (tid: string, entryId: string) =>
+    request<LedgerEntry>(`/v1/tenants/${tid}/ledger/${encodeURIComponent(entryId)}/submit`, { method: 'POST' }),
+
+  // 台账条目关联生成任务
+  bindLedgerTask: (tid: string, entryId: string, taskId: string) =>
+    request<LedgerEntry>(`/v1/tenants/${tid}/ledger/${encodeURIComponent(entryId)}/bind-task`, {
+      method: 'POST', body: JSON.stringify({ task_id: taskId }),
+    }),
+
+  // ---------- P2 监管接口文件输出 ----------
+  // 生成接口文件（txt/xml），返回文件名/行数/预览
+  exportInterfaceFile: (tid: string, taskId: string, format: 'txt' | 'xml') =>
+    request<ExportFileResult>(`/v1/tenants/${tid}/tasks/${taskId}/export-interface-file`, {
+      method: 'POST', body: JSON.stringify({ format }),
+    }),
+
+  // 已生成接口文件列表
+  listTaskExports: (tid: string, taskId: string) =>
+    request<{ files: ExportFileItem[] }>(`/v1/tenants/${tid}/tasks/${taskId}/exports`),
+
+  // 接口文件下载（带认证头，返回 blob 触发浏览器保存）
+  downloadExportFile: async (tid: string, taskId: string, fileName: string) => {
+    const token = auth.getToken()
+    const resp = await fetch(
+      `${BASE}/v1/tenants/${tid}/tasks/${taskId}/exports/${encodeURIComponent(fileName)}`,
+      { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+    if (resp.status === 401) {
+      auth.clear()
+      location.href = '/login'
+      throw new Error('未认证或登录已过期')
+    }
+    if (!resp.ok) throw new Error(`下载失败: ${(await resp.text()).slice(0, 200)}`)
+    const blob = await resp.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = fileName
+    a.click()
+    URL.revokeObjectURL(url)
+  },
 
   // 上传文档（multipart，不走 JSON 封装；需带认证头）
   uploadDocument: async (tid: string, file: File, docType: string) => {

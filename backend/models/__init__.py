@@ -34,3 +34,10 @@ try:
     __all__ += ["TermDict"]
 except ImportError:
     pass
+
+# 报送台账（范围 A，并行开发）：文件就绪后纳入 metadata 收集，未就绪时静默跳过
+try:
+    from backend.models.submission_ledger import SubmissionLedger
+    __all__ += ["SubmissionLedger"]
+except ImportError:
+    pass

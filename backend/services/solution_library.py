@@ -96,7 +96,10 @@ async def record_case_from_state(state: Dict[str, Any]) -> Optional[str]:
             task_id=task_id,
             summary=summary,
             status="completed",
-            created_by=(state.get("report_config") or {}).get("created_by") or "system",
+            # 创建人溯源：优先 state 顶层（编排器透传），回退 report_config，缺省 system
+            created_by=(state.get("created_by")
+                        or (state.get("report_config") or {}).get("created_by")
+                        or "system"),
         )
         session.add(case)
         await session.commit()

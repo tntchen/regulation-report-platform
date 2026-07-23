@@ -148,6 +148,8 @@ class TaskOrchestrator:
                 "stages": [],
                 "outputs": {},
                 "report_config": task_context,
+                # 创建人透传：来自任务上下文，供方案库沉淀等下游溯源
+                "created_by": task_context.get("created_by"),
                 "retry_count": 0,
                 "start_time": start_time,
                 "checkpoint": {"completed": [], "next": ["regulation_parser"]},

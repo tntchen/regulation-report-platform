@@ -83,6 +83,9 @@ async def save_task_state(state: Dict[str, Any]):
     row_data = _state_to_row(state)
     if "cancel_requested" not in state:
         row_data.pop("cancel_requested", None)
+    # created_by 为创建期字段：仅 state 显式携带时才写，防止编排器中间态把已有值冲刷为 None
+    if state.get("created_by"):
+        row_data["created_by"] = state["created_by"]
     async with PlatformSessionLocal() as session:
         existing = await session.get(Task, row_data["id"])
         if existing:

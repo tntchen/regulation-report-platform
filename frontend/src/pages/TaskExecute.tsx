@@ -1,7 +1,8 @@
-import React, { useEffect, useRef, useState } from 'react'
-import { Card, Steps, Tag, Button, Space, Alert, Descriptions, message, Popconfirm } from 'antd'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
+import { Card, Steps, Tag, Button, Space, Alert, Descriptions, message, Popconfirm, List, Typography, Collapse } from 'antd'
+import { DownloadOutlined, FileTextOutlined, FileOutlined } from '@ant-design/icons'
 import { useNavigate, useParams } from 'react-router-dom'
-import { api, TaskDetail, StageRecord } from '../api/client'
+import { api, TaskDetail, StageRecord, ExportFileItem } from '../api/client'
 import { useTenant } from '../App'
 
 // 6 Agent 元信息（与后端编排器 DAG 对齐）+ 映射确认人工节点（human-in-the-loop）
@@ -140,7 +141,111 @@ const TaskExecute: React.FC = () => {
       <Card title="Agent 流水线">
         <Row_AgentCards task={task} lastStageOf={lastStageOf} runCountOf={runCountOf} nextKeys={nextKeys} />
       </Card>
+
+      {/* P2 接口文件导出：任务完成后可生成监管接口文件（TXT/XML） */}
+      {task.status === 'completed' && (
+        <InterfaceFileExport tenantId={tenantId} taskId={task.task_id} />
+      )}
     </Space>
+  )
+}
+
+/** 接口文件导出区：TXT/XML 生成 + 文件列表 + 下载 + preview 展开 */
+const InterfaceFileExport: React.FC<{ tenantId: string; taskId: string }> = ({ tenantId, taskId }) => {
+  const [files, setFiles] = useState<ExportFileItem[]>([])
+  const [previews, setPreviews] = useState<Record<string, string>>({})
+  const [generating, setGenerating] = useState<'txt' | 'xml' | null>(null)
+
+  const load = useCallback(async () => {
+    try {
+      const r = await api.listTaskExports(tenantId, taskId)
+      setFiles(r.files)
+    } catch {
+      // 后端接口未就绪时静默忽略，不阻塞页面
+    }
+  }, [tenantId, taskId])
+
+  useEffect(() => { load() }, [load])
+
+  const generate = async (format: 'txt' | 'xml') => {
+    setGenerating(format)
+    try {
+      const r = await api.exportInterfaceFile(tenantId, taskId, format)
+      message.success(`已生成 ${r.file_name}（${r.row_count} 行）`)
+      setPreviews((p) => ({ ...p, [r.file_name]: r.preview }))
+      await load()
+    } catch (e: any) {
+      message.error(`生成失败: ${e.message}`)
+    } finally {
+      setGenerating(null)
+    }
+  }
+
+  const download = async (fileName: string) => {
+    try {
+      await api.downloadExportFile(tenantId, taskId, fileName)
+    } catch (e: any) {
+      message.error(`下载失败: ${e.message}`)
+    }
+  }
+
+  return (
+    <Card
+      title="接口文件导出"
+      extra={
+        <Space>
+          <Button icon={<FileTextOutlined />} loading={generating === 'txt'} onClick={() => generate('txt')}>
+            生成 TXT
+          </Button>
+          <Button icon={<FileOutlined />} loading={generating === 'xml'} onClick={() => generate('xml')}>
+            生成 XML
+          </Button>
+        </Space>
+      }
+    >
+      <List
+        size="small"
+        dataSource={files}
+        locale={{ emptyText: '尚未生成接口文件，点击右上角按钮生成' }}
+        renderItem={(f) => (
+          <List.Item
+            actions={[
+              <Button key="dl" size="small" type="link" icon={<DownloadOutlined />}
+                onClick={() => download(f.file_name)}>
+                下载
+              </Button>,
+            ]}
+          >
+            <List.Item.Meta
+              title={<Space>{f.file_name}<Tag>{(f.format || '').toUpperCase()}</Tag></Space>}
+              description={
+                <span style={{ color: '#999', fontSize: 12 }}>
+                  {f.row_count != null ? `${f.row_count} 行` : ''}
+                  {f.created_at ? ` · ${f.created_at}` : ''}
+                </span>
+              }
+            />
+            {previews[f.file_name] && (
+              <Collapse
+                size="small"
+                style={{ width: '100%', marginTop: 8 }}
+                items={[{
+                  key: 'preview',
+                  label: '内容预览',
+                  children: (
+                    <Typography.Paragraph>
+                      <pre style={{ maxHeight: 200, overflow: 'auto', background: '#fafafa', padding: 8, fontSize: 12 }}>
+                        {previews[f.file_name]}
+                      </pre>
+                    </Typography.Paragraph>
+                  ),
+                }]}
+              />
+            )}
+          </List.Item>
+        )}
+      />
+    </Card>
   )
 }
 

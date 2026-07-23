@@ -3,7 +3,7 @@ import { BrowserRouter, Routes, Route, useNavigate, useLocation, Navigate } from
 import { Layout, Menu, Select, Tag, Space, Typography, Dropdown, Spin } from 'antd'
 import {
   HomeOutlined, DatabaseOutlined, ApartmentOutlined, UserOutlined, LogoutOutlined,
-  FileSearchOutlined, BookOutlined,
+  FileSearchOutlined, BookOutlined, ScheduleOutlined,
 } from '@ant-design/icons'
 import { api, auth, TenantBrief } from './api/client'
 import TaskHall from './pages/TaskHall'
@@ -14,6 +14,7 @@ import VectorLibrary from './pages/VectorLibrary'
 import AuditLogs from './pages/AuditLogs'
 import MappingWorkbench from './pages/MappingWorkbench'
 import ReportPacks from './pages/ReportPacks'
+import SubmissionLedger from './pages/SubmissionLedger'
 import Login from './pages/Login'
 
 const { Header, Sider, Content } = Layout
@@ -112,6 +113,7 @@ const AppShell: React.FC = () => {
               items={[
                 { key: '/', icon: <HomeOutlined />, label: '任务大厅' },
                 { key: '/packs', icon: <BookOutlined />, label: '场景包管理' },
+                { key: '/ledger', icon: <ScheduleOutlined />, label: '报送台账' },
                 { key: '/vectors', icon: <DatabaseOutlined />, label: '向量库维护' },
                 { key: '/audit', icon: <FileSearchOutlined />, label: '审计日志' },
               ]}
@@ -126,6 +128,7 @@ const AppShell: React.FC = () => {
               <Route path="/quality/:taskId" element={<QualityReport />} />
               <Route path="/twin/:taskId" element={<DigitalTwin />} />
               <Route path="/packs" element={<ReportPacks />} />
+              <Route path="/ledger" element={<SubmissionLedger />} />
               <Route path="/vectors" element={<VectorLibrary />} />
               <Route path="/audit" element={<AuditLogs />} />
             </Routes>

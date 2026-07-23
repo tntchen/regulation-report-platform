@@ -133,6 +133,18 @@ try:
     app.include_router(diff_router, prefix="/v1")
 except Exception as _e:
     logger.warning("diff 路由未就绪，跳过注册: %s", _e)
+try:
+    # 【范围B】监管接口文件导出路由（并行开发期间兜底跳过不影响主应用）
+    from backend.api.export import export_router  # noqa: E402
+    app.include_router(export_router, prefix="/v1")
+except Exception as _e:
+    logger.warning("export 路由未就绪，跳过注册: %s", _e)
+try:
+    # 报送台账 + 截止期路由（范围A；并行开发期间兜底跳过不影响主应用）
+    from backend.api.ledger import ledger_router  # noqa: E402
+    app.include_router(ledger_router, prefix="/v1")
+except Exception as _e:
+    logger.warning("ledger 路由未就绪，跳过注册: %s", _e)
 
 
 # ============================================

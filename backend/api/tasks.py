@@ -51,6 +51,8 @@ async def create_task(tenant_id: str, task_data: dict, request: Request,
         # HITL 映射工作台：场景包（不显式指定时 Agent 侧缺省 G01 兼容存量行为）+ 自动模式
         "report_pack_id": task_data.get("report_pack_id"),
         "auto_mode": bool(task_data.get("auto_mode", False)),
+        # 创建人透传：任务上下文携带，供编排器 state / 方案库沉淀溯源
+        "created_by": user.get("username"),
     }
 
     # 落库 queued，立即返回（worker 后台拾取执行）
