@@ -44,8 +44,10 @@ def _models():
         raise HTTPException(status_code=503, detail="映射功能依赖（范围B模型）尚未就绪")
 
 
-def _mapping_to_json(m, profile: Optional[dict] = None) -> dict:
-    """FieldMapping → API 响应（含 evidence 与画像）"""
+def _mapping_to_json(m, profile: Optional[dict] = None,
+                     caliber_text: str = "",
+                     candidates: Optional[list] = None) -> dict:
+    """FieldMapping → API 响应（含 evidence、画像、口径提示与候选列表）"""
     return {
         "id": m.id,
         "task_id": m.task_id,
@@ -57,10 +59,106 @@ def _mapping_to_json(m, profile: Optional[dict] = None) -> dict:
         "confidence": m.confidence,
         "evidence": m.evidence or {},
         "profile": profile,  # 源字段画像（best-effort，失败为 None）
+        "caliber_text": caliber_text or "",     # 口径提示（来自场景包 target_schema）
+        "candidates": candidates or [],          # 候选源字段（[0]=当前选中，其余为备选）
         "status": m.status,
         "confirmed_by": m.confirmed_by,
         "confirmed_at": m.confirmed_at.isoformat() if m.confirmed_at else None,
     }
+
+
+async def _load_pack_context(pack_ids) -> tuple:
+    """加载场景包上下文：{(pack_id, target_field): caliber_text} 与 {pack_id: source_tables}
+
+    caliber_text 不落 field_mappings，权威来源是场景包 target_schema；失败降级为空。
+    """
+    caliber_map: dict = {}
+    pack_tables: dict = {}
+    try:
+        from backend.models.report_pack import ReportPack
+        async with PlatformSessionLocal() as session:
+            rows = (await session.execute(
+                select(ReportPack).where(ReportPack.id.in_(list(pack_ids)))
+            )).scalars().all()
+        for pack in rows:
+            pack_tables[pack.id] = pack.source_tables or []
+            for spec in pack.target_schema or []:
+                field = spec.get("field") if isinstance(spec, dict) else None
+                if field:
+                    caliber_map[(pack.id, field)] = spec.get("caliber_text") or ""
+    except Exception:
+        pass
+    return caliber_map, pack_tables
+
+
+async def _expand_candidate_pool(pack_tables: dict) -> list:
+    """按场景包 source_tables 拉取源表 schema 并展开候选 [{table, column, ...}]
+
+    候选列表不落库（推断时即时展开），此处按同一路径 best-effort 重建；
+    任一表查询失败跳过该表，整体失败返回空（不影响清单主响应）。
+    """
+    try:
+        from backend.mcp.database_mcp import DatabaseMCPService
+        from backend.services.mapping_engine import MappingEngine
+    except Exception:
+        return []
+    tables = sorted({t for ts in pack_tables.values() for t in (ts or [])})
+    if not tables:
+        return []
+    db_mcp = DatabaseMCPService({"db_type": "sqlite_demo"})
+    schemas = {}
+    for table in tables:
+        try:
+            schemas[table] = await db_mcp.query_schema(table_name=table)
+        except Exception:
+            continue
+    try:
+        return MappingEngine._expand_candidates(schemas, tables)
+    except Exception:
+        return []
+
+
+# 本地名称通道引擎（不触发 embedding 模型加载；embed_fn 仅为占位，名称通道不调用）
+_local_name_engine = None
+
+
+def _name_engine():
+    global _local_name_engine
+    if _local_name_engine is None:
+        from backend.services.mapping_engine import MappingEngine
+        _local_name_engine = MappingEngine(embed_fn=lambda text: [])
+    return _local_name_engine
+
+
+def _rank_candidates(item: dict, pool: list, limit: int = 4) -> list:
+    """当前选中置顶 + 备选候选（按名称通道相似度排序，best-effort 重算）
+
+    说明：field_mappings 只持久化最优候选的融合分，备选候选未落库；
+    备选 confidence 为本地名称相似度重算分，仅供前端"其他候选"展示参考。
+    """
+    current = None
+    if item.get("source_table") and item.get("source_field"):
+        current = {"source_table": item["source_table"],
+                   "source_field": item["source_field"],
+                   "confidence": item.get("confidence") or 0.0}
+    scored = []
+    try:
+        engine = _name_engine()
+        for cand in pool:
+            if current and cand["table"] == current["source_table"] \
+                    and cand["column"] == current["source_field"]:
+                continue
+            score = engine._name_score(item.get("target_field") or "",
+                                       item.get("caliber_text") or "",
+                                       cand["column"])
+            scored.append({"source_table": cand["table"],
+                           "source_field": cand["column"],
+                           "confidence": score})
+    except Exception:
+        scored = []
+    scored.sort(key=lambda c: -c["confidence"])
+    head = [current] if current else []
+    return (head + scored)[:limit]
 
 
 async def _load_profile(table: Optional[str], column: Optional[str]) -> Optional[dict]:
@@ -175,6 +273,14 @@ async def list_task_mappings(tenant_id: str, task_id: str,
             select(FieldMapping).where(FieldMapping.task_id == task_id)
         )).scalars().all()
         items = [_mapping_to_json(m) for m in rows]
+    # 口径提示（场景包 target_schema）+ 候选列表（best-effort 重建，失败为空）
+    pack_ids = {i["report_pack_id"] for i in items if i["report_pack_id"]}
+    caliber_map, pack_tables = await _load_pack_context(pack_ids)
+    pool = await _expand_candidate_pool(pack_tables)
+    for item in items:
+        item["caliber_text"] = caliber_map.get(
+            (item["report_pack_id"], item["target_field"]), "")
+        item["candidates"] = _rank_candidates(item, pool)
     # 画像逐个 best-effort 补齐（候选源表采样，不进 DB 会话）
     for item in items:
         item["profile"] = await _load_profile(item["source_table"], item["source_field"])

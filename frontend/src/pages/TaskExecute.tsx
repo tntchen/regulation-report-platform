@@ -172,7 +172,9 @@ const InterfaceFileExport: React.FC<{ tenantId: string; taskId: string }> = ({ t
     try {
       const r = await api.exportInterfaceFile(tenantId, taskId, format)
       message.success(`已生成 ${r.file_name}（${r.row_count} 行）`)
-      setPreviews((p) => ({ ...p, [r.file_name]: r.preview }))
+      // 后端 preview 实际为 string[]（内容行数组），归一化为换行拼接文本再渲染
+      const previewText = Array.isArray(r.preview) ? r.preview.join('\n') : (r.preview || '')
+      setPreviews((p) => ({ ...p, [r.file_name]: previewText }))
       await load()
     } catch (e: any) {
       message.error(`生成失败: ${e.message}`)

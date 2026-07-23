@@ -150,13 +150,35 @@ def test_export_xml_format(client):
 # ---------- 文件列表 ----------
 
 def test_list_export_files(client):
-    """GET exports：列出已生成的 txt+xml 两个文件"""
+    """GET exports：列出已生成的 txt+xml 两个文件，含 row_count 与 created_at"""
     headers = login(client)
     r = client.get(f"/v1/tenants/T001/tasks/{TASK_ID}/exports", headers=headers)
     assert r.status_code == 200
-    names = {f["file_name"] for f in r.json()["files"]}
+    files = r.json()["files"]
+    names = {f["file_name"] for f in files}
     assert names == {f"{TARGET_TABLE}.txt", f"{TARGET_TABLE}.xml"}
-    assert all(f["size"] > 0 for f in r.json()["files"])
+    assert all(f["size"] > 0 for f in files)
+    # sidecar 元数据不出现在列表中
+    assert not any(n.endswith(".meta.json") for n in names)
+    # row_count 来自生成时持久化的 sidecar 元数据；created_at 为 ISO mtime
+    assert all(f["row_count"] == len(_RESULT_ROWS) for f in files)
+    assert all(f["created_at"] and "T" in f["created_at"] for f in files)
+
+
+def test_list_export_files_row_count_fallback(client):
+    """sidecar 元数据缺失时 row_count 为 None（不扫文件硬算），created_at 仍返回"""
+    out_dir = interface_file_service.exports_dir(TASK_ID)
+    path = os.path.join(out_dir, f"{TARGET_TABLE}.txt")
+    meta = path + ".meta.json"
+    backup = meta + ".bak"
+    os.rename(meta, backup)
+    try:
+        files = interface_file_service.list_export_files(TASK_ID)
+        entry = [f for f in files if f["file_name"] == f"{TARGET_TABLE}.txt"][0]
+        assert entry["row_count"] is None
+        assert entry["created_at"]
+    finally:
+        os.rename(backup, meta)
 
 
 # ---------- 下载与白名单 ----------

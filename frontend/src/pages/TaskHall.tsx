@@ -15,6 +15,27 @@ const STATUS_TAG: Record<string, { color: string; text: string }> = {
   created: { color: 'default', text: '已创建' },
 }
 
+/** 相似任务 summary 归一化：后端可能返回对象 dict（含 report_pack_id/mapping 等），
+ * 绝不能直接当 React child 渲染，统一转成人类可读的一句话 */
+function similarSummaryText(summary: string | Record<string, unknown>): string {
+  if (typeof summary === 'string') return summary
+  if (!summary || typeof summary !== 'object') return ''
+  // 优先提取有意义字段拼一句话
+  const parts: string[] = []
+  const pack = summary.report_pack_id
+  if (pack) parts.push(`场景包 ${String(pack)}`)
+  const mapping = summary.mapping ?? summary.mapping_count
+  if (mapping != null) {
+    parts.push(typeof mapping === 'number' ? `映射 ${mapping} 项` : `映射 ${String(mapping)}`)
+  }
+  const reason = summary.reason ?? summary.highlight ?? summary.note
+  if (reason) parts.push(String(reason))
+  if (parts.length > 0) return parts.join('，')
+  // 兜底：JSON 序列化并截断
+  const s = JSON.stringify(summary)
+  return s.length > 120 ? `${s.slice(0, 120)}…` : s
+}
+
 /** P1 任务大厅：任务列表 + 新建任务 + 一键演示 */
 const TaskHall: React.FC = () => {
   const { tenantId } = useTenant()
@@ -37,7 +58,7 @@ const TaskHall: React.FC = () => {
     setModalOpen(true)
     // 场景包下拉从后端加载（替换原硬编码模板），缺省 G01
     api.listReportPacks(tenantId)
-      .then((r) => setPacks(r.packs.filter((p) => p.status !== 'disabled')))
+      .then((r) => setPacks(r.report_packs.filter((p) => p.status !== 'disabled')))
       .catch((e) => message.warning(`场景包加载失败: ${e.message}`))
     // 弹窗缺省场景包也预取一次相似任务
     onPackChange(form.getFieldValue('report_pack_id') || 'G01')
@@ -206,7 +227,9 @@ const TaskHall: React.FC = () => {
                         </Typography.Text>
                         <Tag color="blue">相似度 {(t.similarity * 100).toFixed(0)}%</Tag>
                         {t.summary && (
-                          <Typography.Text type="secondary" style={{ fontSize: 12 }}>{t.summary}</Typography.Text>
+                          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                            {similarSummaryText(t.summary)}
+                          </Typography.Text>
                         )}
                       </Space>
                     </List.Item>

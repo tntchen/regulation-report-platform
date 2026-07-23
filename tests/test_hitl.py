@@ -436,3 +436,58 @@ def test_mappings_task_not_found(client):
     headers = login(client)
     r = client.get("/v1/tenants/T001/tasks/TASK_NOPE/mappings", headers=headers)
     assert r.status_code == 404
+
+
+# ---------- 清单响应字段：caliber_text 与 candidates ----------
+
+def test_mappings_include_caliber_text_and_candidates(client, mock_inference):
+    """清单每项含 caliber_text（场景包 target_schema 口径）与 candidates（候选列表）"""
+    headers = login(client)
+
+    # 落一个真实场景包（DB 行），target_schema 带口径文本
+    from backend.database import PlatformSessionLocal
+    from backend.models.report_pack import ReportPack
+
+    async def _seed_pack():
+        async with PlatformSessionLocal() as s:
+            existing = await s.get(ReportPack, "G_CAL")
+            if not existing:
+                s.add(ReportPack(
+                    id="G_CAL", report_name="口径测试包", report_type="1104",
+                    target_table="rpt_cal",
+                    target_schema=[
+                        {"field": "field_0", "data_type": "varchar", "required": True,
+                         "caliber_text": "测试口径A"},
+                        {"field": "field_1", "data_type": "decimal", "required": True,
+                         "caliber_text": "测试口径B"},
+                    ],
+                    source_tables=["loan_contract"]))
+                await s.commit()
+    asyncio.run(_seed_pack())
+
+    mock_inference([(0.90, "ai_inferred"), (0.60, "ai_inferred")])
+    r = client.post("/v1/tenants/T001/tasks", headers=headers, json={
+        "report_type": "1104", "report_code": "HITL_FIELDS", "section": "测试",
+        "source_tables": ["loan_contract"], "target_table": "rpt_hitl_fields",
+        "report_pack_id": "G_CAL", "auto_mode": False,
+    })
+    assert r.status_code == 200, r.text
+    task_id = r.json()["task_id"]
+    drive_worker()
+    assert task_status(client, headers, task_id)["status"] == "waiting_confirmation"
+
+    data = client.get(f"/v1/tenants/T001/tasks/{task_id}/mappings", headers=headers).json()
+    assert data["total"] == 2
+    by_field = {m["target_field"]: m for m in data["mappings"]}
+    # 口径提示来自场景包 target_schema
+    assert by_field["field_0"]["caliber_text"] == "测试口径A"
+    assert by_field["field_1"]["caliber_text"] == "测试口径B"
+    # 候选列表存在；[0] 为当前选中（source_table/source_field 与映射一致）
+    for m in data["mappings"]:
+        assert isinstance(m["candidates"], list)
+        if m["candidates"]:
+            top = m["candidates"][0]
+            assert top["source_table"] == m["source_table"]
+            assert top["source_field"] == m["source_field"]
+            assert all({"source_table", "source_field", "confidence"} <= set(c)
+                       for c in m["candidates"])

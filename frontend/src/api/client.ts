@@ -203,7 +203,8 @@ export interface RegulationDiffResult {
   added_sections: any[]      // 新增段落
   removed_sections: any[]    // 删除段落
   changed_sections: any[]    // 修改段落
-  affected_keywords: string[] // 受影响关键词（Tag 云）
+  // 受影响关键词：后端返回对象数组 [{keyword, section}]，兼容纯字符串
+  affected_keywords: (string | { keyword: string; section?: string })[]
 }
 
 /** 新旧逻辑回归结果：POST /twin/regression */
@@ -223,7 +224,8 @@ export interface SimilarTask {
   status: string
   created_at?: string
   similarity: number         // 0-1
-  summary?: string
+  // 后端实际返回对象 dict（含 report_pack_id/mapping 等），渲染时需归一化
+  summary?: string | Record<string, unknown>
 }
 
 export interface AuditLogItem {
@@ -252,7 +254,16 @@ export interface ExportFileResult {
   file_name: string
   format: string
   row_count: number
-  preview: string          // 文件内容预览（前几行）
+  preview: string | string[] // 后端返回内容行数组，渲染前 join('\n')
+}
+
+/** 新建任务响应：POST /v1/tenants/{tid}/tasks 实际返回结构（非完整 TaskDetail） */
+export interface CreateTaskResult {
+  task_id: string
+  status: string
+  progress?: number
+  message?: string
+  idempotent?: boolean
 }
 
 /** 已生成导出文件列表项：GET /tasks/{task_id}/exports */
@@ -282,7 +293,7 @@ export const api = {
     request<{ total: number; tasks: TaskBrief[] }>(`/v1/tenants/${tid}/tasks`),
 
   createTask: (tid: string, payload: Record<string, any>) =>
-    request<TaskDetail & { task_id: string }>(`/v1/tenants/${tid}/tasks`, {
+    request<CreateTaskResult>(`/v1/tenants/${tid}/tasks`, {
       method: 'POST', body: JSON.stringify(payload),
     }),
 
@@ -325,7 +336,7 @@ export const api = {
 
   // ---------- 场景包（契约 §2.5，admin 才可写，后端强制鉴权） ----------
   listReportPacks: (tid: string) =>
-    request<{ total: number; packs: ReportPack[] }>(`/v1/tenants/${tid}/report-packs`),
+    request<{ total: number; report_packs: ReportPack[] }>(`/v1/tenants/${tid}/report-packs`),
 
   getReportPack: (tid: string, packId: string) =>
     request<ReportPack>(`/v1/tenants/${tid}/report-packs/${packId}`),

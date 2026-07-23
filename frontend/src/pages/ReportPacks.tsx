@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Card, Table, Tag, Button, Space, Drawer, Descriptions, Modal, Form, Input, Select,
-  message, Typography, Divider, Popconfirm, InputNumber, Checkbox, Tabs, Empty,
+  message, Typography, Divider, Popconfirm, InputNumber, Checkbox, Tabs, Empty, Spin,
 } from 'antd'
 import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined } from '@ant-design/icons'
 import { api, ReportPack, TargetSchemaField, ReconciliationRule, TableProfile } from '../api/client'
@@ -98,13 +98,22 @@ const ProfileTab: React.FC<{ tenantId: string; pack: ReportPack }> = ({ tenantId
   )
 }
 
+/**
+ * 列表端点 GET /report-packs 只返回概要字段（不含 target_schema/reconciliation_rules/regulation_keywords）。
+ * 完整详情需经 api.getReportPack 拉取。
+ */
+type ReportPackListItem = Omit<ReportPack, 'target_schema' | 'reconciliation_rules' | 'regulation_keywords'> &
+  Partial<Pick<ReportPack, 'target_schema' | 'reconciliation_rules' | 'regulation_keywords'>>
+
 /** P7 场景包管理：列表 + 详情抽屉 + 新建/编辑（admin） */
 const ReportPacks: React.FC = () => {
   const { tenantId } = useTenant()
-  const [packs, setPacks] = useState<ReportPack[]>([])
+  const [packs, setPacks] = useState<ReportPackListItem[]>([])
   const [loading, setLoading] = useState(false)
   const [detail, setDetail] = useState<ReportPack | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
   const [editorOpen, setEditorOpen] = useState(false)
+  const [editorLoading, setEditorLoading] = useState(false)
   const [editing, setEditing] = useState<ReportPack | null>(null) // null = 新建
   const [saving, setSaving] = useState(false)
   const [form] = Form.useForm()
@@ -117,7 +126,7 @@ const ReportPacks: React.FC = () => {
     setLoading(true)
     try {
       const r = await api.listReportPacks(tenantId)
-      setPacks(r.packs)
+      setPacks(r.report_packs)
     } catch (e: any) {
       message.error(`场景包加载失败: ${e.message}`)
     } finally {
@@ -145,6 +154,32 @@ const ReportPacks: React.FC = () => {
       setRuleRows([])
     }
     setEditorOpen(true)
+  }
+
+  /** 打开详情抽屉：列表项不含完整结构，先拉完整包再展示 */
+  const openDetail = async (item: ReportPackListItem) => {
+    setDetail(null)
+    setDetailLoading(true)
+    try {
+      setDetail(await api.getReportPack(tenantId, item.id))
+    } catch (e: any) {
+      message.error(`场景包详情加载失败: ${e.message}`)
+      setDetail(null)
+    } finally {
+      setDetailLoading(false)
+    }
+  }
+
+  /** 打开编辑弹窗：列表项不含 target_schema 等，先拉完整包再编辑 */
+  const openEditorFor = async (item: ReportPackListItem) => {
+    setEditorLoading(true)
+    try {
+      openEditor(await api.getReportPack(tenantId, item.id))
+    } catch (e: any) {
+      message.error(`场景包详情加载失败: ${e.message}`)
+    } finally {
+      setEditorLoading(false)
+    }
   }
 
   const save = async () => {
@@ -235,20 +270,16 @@ const ReportPacks: React.FC = () => {
     { title: '类型', dataIndex: 'report_type', key: 'report_type', width: 90, render: (v: string) => <Tag color="blue">{v}</Tag> },
     { title: '目标表', dataIndex: 'target_table', key: 'target_table', width: 200, render: (v: string) => <code>{v}</code> },
     {
-      title: '字段数', key: 'field_count', width: 80,
-      render: (_: any, r: ReportPack) => r.target_schema?.length ?? 0,
-    },
-    {
       title: '状态', dataIndex: 'status', key: 'status', width: 90,
       render: (s: string) => <Tag color={PACK_STATUS[s]?.color}>{PACK_STATUS[s]?.text || s}</Tag>,
     },
     {
       title: '操作', key: 'op', width: 160,
-      render: (_: any, r: ReportPack) => (
+      render: (_: any, r: ReportPackListItem) => (
         <Space>
-          <Button size="small" type="link" onClick={() => setDetail(r)}>详情</Button>
+          <Button size="small" type="link" onClick={() => openDetail(r)}>详情</Button>
           {admin && (
-            <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openEditor(r)}>编辑</Button>
+            <Button size="small" type="link" icon={<EditOutlined />} loading={editorLoading} onClick={() => openEditorFor(r)}>编辑</Button>
           )}
         </Space>
       ),
@@ -275,11 +306,17 @@ const ReportPacks: React.FC = () => {
       {/* 详情抽屉 */}
       <Drawer
         width={720}
-        open={!!detail}
-        onClose={() => setDetail(null)}
-        title={detail ? `场景包 ${detail.id} · ${detail.report_name}` : ''}
+        open={detailLoading || !!detail}
+        onClose={() => { setDetail(null); setDetailLoading(false) }}
+        title={detail ? `场景包 ${detail.id} · ${detail.report_name}` : '场景包详情'}
       >
-        {detail && (
+        {detailLoading && (
+          <div style={{ textAlign: 'center', padding: 64 }}>
+            <Spin size="large" />
+            <Typography.Paragraph type="secondary" style={{ marginTop: 16 }}>加载完整场景包…</Typography.Paragraph>
+          </div>
+        )}
+        {detail && !detailLoading && (
           <Tabs
             defaultActiveKey="info"
             items={[

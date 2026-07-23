@@ -13,6 +13,8 @@
 
 import os
 import re
+import json
+from datetime import datetime
 from typing import Dict, Any, List, Optional
 from xml.sax.saxutils import escape
 
@@ -107,6 +109,13 @@ async def generate_interface_file(task_id: str, task_state: Dict[str, Any],
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
 
+    # sidecar 元数据：持久化行数，供文件列表直接读取（避免列表时重扫大文件）
+    try:
+        with open(_meta_path(path), "w", encoding="utf-8") as f:
+            json.dump({"row_count": len(rows)}, f)
+    except OSError:
+        pass  # 元数据写入失败不阻断导出主流程
+
     # 预览取前 5 个数据行（TXT 含表头则前 6 行；统一按内容行截取，Demo 足够）
     preview = content.splitlines()[:6 if fmt == "txt" else 8]
 
@@ -119,20 +128,50 @@ async def generate_interface_file(task_id: str, task_state: Dict[str, Any],
     }
 
 
+# sidecar 元数据后缀（生成时写入 row_count；列表读取，缺失则 row_count=None）
+_META_SUFFIX = ".meta.json"
+
+
+def _meta_path(file_path: str) -> str:
+    """接口文件对应的 sidecar 元数据路径"""
+    return file_path + _META_SUFFIX
+
+
+def _read_row_count(path: str) -> Optional[int]:
+    """从 sidecar 元数据读取行数；元数据缺失/损坏返回 None（不扫大文件硬算）"""
+    try:
+        with open(_meta_path(path), encoding="utf-8") as f:
+            value = json.load(f).get("row_count")
+        return int(value) if value is not None else None
+    except Exception:
+        return None
+
+
 def list_export_files(task_id: str) -> List[Dict[str, Any]]:
-    """列出任务已生成的接口文件（不存在目录返回空）"""
+    """列出任务已生成的接口文件（不存在目录返回空）
+
+    每项 {file_name, size, format, row_count, created_at}：
+    - created_at：文件 mtime（ISO 格式）
+    - row_count：生成时写入的 sidecar 元数据；缺失（旧文件/元数据损坏）为 None
+    """
     out_dir = exports_dir(task_id)
     if not os.path.isdir(out_dir):
         return []
     files = []
     for name in sorted(os.listdir(out_dir)):
         path = os.path.join(out_dir, name)
-        if os.path.isfile(path) and _FILENAME_RE.match(name):
-            files.append({
-                "file_name": name,
-                "size": os.path.getsize(path),
-                "format": name.rsplit(".", 1)[-1] if "." in name else "",
-            })
+        if not os.path.isfile(path) or not _FILENAME_RE.match(name):
+            continue
+        # 跳过 sidecar 元数据与隐藏文件，只列接口文件本体
+        if name.endswith(_META_SUFFIX) or name.startswith("."):
+            continue
+        files.append({
+            "file_name": name,
+            "size": os.path.getsize(path),
+            "format": name.rsplit(".", 1)[-1] if "." in name else "",
+            "row_count": _read_row_count(path),
+            "created_at": datetime.fromtimestamp(os.path.getmtime(path)).isoformat(),
+        })
     return files
 
 
@@ -141,6 +180,9 @@ def resolve_export_file(task_id: str, file_name: str) -> Optional[str]:
     if not file_name or not _FILENAME_RE.match(file_name):
         return None
     if ".." in file_name or file_name.startswith("."):
+        return None
+    # sidecar 元数据不对外开放下载
+    if file_name.endswith(_META_SUFFIX):
         return None
     out_dir = os.path.realpath(exports_dir(task_id))
     path = os.path.realpath(os.path.join(out_dir, file_name))

@@ -14,6 +14,11 @@ const LEVEL_COLOR: Record<string, string> = {
   critical: 'red', high: 'orange', medium: 'gold', low: 'blue',
 }
 
+/** 受影响关键词归一化：后端返回对象数组 [{keyword, section}]，兼容纯字符串 */
+function keywordText(k: string | { keyword: string; section?: string }): string {
+  return typeof k === 'string' ? k : k?.keyword ?? JSON.stringify(k)
+}
+
 /** 制度 diff 段落渲染：后端返回段落可能为字符串或对象，兼容两种形态 */
 function sectionText(s: any): string {
   if (typeof s === 'string') return s
@@ -93,7 +98,10 @@ const RegulationDiffPanel: React.FC<{ tenantId: string }> = ({ tenantId }) => {
           {(result.affected_keywords || []).length > 0 && (
             <div style={{ marginTop: 12 }}>
               <Typography.Text type="secondary" style={{ marginRight: 8 }}>受影响关键词：</Typography.Text>
-              {result.affected_keywords.map((k) => <Tag key={k} color="volcano">{k}</Tag>)}
+              {result.affected_keywords.map((k) => {
+                const text = keywordText(k)
+                return <Tag key={text} color="volcano">{text}</Tag>
+              })}
             </div>
           )}
         </>
@@ -114,7 +122,7 @@ const RegressionPanel: React.FC<{ tenantId: string; defaultPackId?: string }> = 
 
   useEffect(() => {
     api.listReportPacks(tenantId)
-      .then((r) => setPacks(r.packs))
+      .then((r) => setPacks(r.report_packs))
       .catch((e) => message.warning(`场景包加载失败: ${e.message}`))
   }, [tenantId])
 
