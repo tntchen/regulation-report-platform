@@ -54,10 +54,67 @@ export interface StageRecord {
   duration_ms: number; error?: string; timestamp: string
 }
 
+// ---------- 测试验证（test_verify agent）输出结构 ----------
+// 与 backend/agents/test_verify.py 的 output / _check_result / _eval_rule 对齐
+
+/** 单条勾稽规则求值结果（规则驱动对账，_eval_rule 产出） */
+export interface ReconcileRuleResult {
+  name: string
+  expression: string
+  tolerance: number
+  actual: number | null
+  expected: number | null
+  abs_diff: number | null
+  rel_diff: number | null
+  passed: boolean
+  error?: string
+}
+
+/** 单项校验结果（_check_result 产出）；check_id === 'reconcile' 即勾稽对账项 */
+export interface TestVerifyCheck {
+  check_id: string
+  name: string
+  status: 'pass' | 'fail' | 'skipped'
+  critical: boolean
+  /** 硬编码口径: {target_total, source_total, abs_diff, rel_diff}；
+   *  规则驱动: {rule_results, rule_count, failed_count} */
+  metrics: {
+    target_total?: number
+    source_total?: number
+    abs_diff?: number
+    rel_diff?: number
+    rule_results?: ReconcileRuleResult[]
+    rule_count?: number
+    failed_count?: number
+    [key: string]: any
+  }
+  samples: string[]
+  detail: string
+}
+
+/** outputs.test_verify 整体结构（execute 汇总的 output） */
+export interface TestVerifyOutput {
+  overall_result: 'pass' | 'fail'
+  critical_fail: boolean
+  fail_reasons: string[]
+  checks: TestVerifyCheck[]
+  pass_count?: number
+  fail_count?: number
+  skipped_count?: number
+  summary?: string
+}
+
+/** 任务 outputs：已知 agent 给出具名类型，其余 agent 保持 any */
+export interface TaskOutputs {
+  quality_gate?: any
+  test_verify?: TestVerifyOutput
+  [agent: string]: any
+}
+
 export interface TaskDetail {
   task_id: string; tenant_id: string; status: string
   current_stage?: string; progress: number; retry_count: number
-  error?: string; stages: StageRecord[]; outputs: Record<string, any>
+  error?: string; stages: StageRecord[]; outputs: TaskOutputs
   duration_ms: number
 }
 
